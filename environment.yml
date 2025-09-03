@@ -1,0 +1,19 @@
+name: basicaudio
+channels:
+  - pytorch
+  - nvidia          # enables optional GPU add-on below
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.12
+  - numpy
+  - matplotlib
+  - jupyterlab
+  - ipykernel
+  - tensorboard
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pip
+  - pip:
+    - soundfile

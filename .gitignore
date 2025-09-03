@@ -1,0 +1,37 @@
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
+scratch/
+.ipynb_checkpoints/
+/runs
+
+/synth       #submodule - doesn't need to be here, just installed in conda
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+.wheelhouse/
+
+
+# Jupyter
+.ipynb_checkpoints/
+
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
