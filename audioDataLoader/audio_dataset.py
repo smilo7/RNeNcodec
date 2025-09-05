@@ -252,8 +252,98 @@ class EnCodecLatentDataset(Dataset):
 
     def __len__(self):
         return len(self.sequence_map)
-
+    
     def __getitem__(self, idx):
+        # Get the first sequence (first half)
+        dataset_idx1, start_frame1, token_file_path1 = self.sequence_map[idx]
+        row1 = self.dataset[dataset_idx1]
+        
+        # Get a random second sequence (second half)
+        random_idx = random.randint(0, len(self.sequence_map) - 1)
+        dataset_idx2, start_frame2, token_file_path2 = self.sequence_map[random_idx]
+        row2 = self.dataset[dataset_idx2]
+        
+        # Calculate half sequence length
+        half_seq_len = self.sequence_length // 2
+        remainder = self.sequence_length % 2  # Handle odd sequence lengths
+        
+        # First half length (gets the extra frame if sequence_length is odd)
+        first_half_len = half_seq_len + remainder
+        second_half_len = half_seq_len
+        
+        # Load and process first sequence
+        codes1 = self._load_ecdc_codes(token_file_path1)
+        if codes1 is None:
+            return self.__getitem__((idx + 1) % len(self.sequence_map))
+        
+        # Extract first half + 1 frame for input/target shift
+        end_frame1 = start_frame1 + first_half_len + 1
+        sequence_codes1 = codes1[:, :self.n_q, start_frame1:end_frame1]
+        
+        # Load and process second sequence  
+        codes2 = self._load_ecdc_codes(token_file_path2)
+        if codes2 is None:
+            return self.__getitem__((idx + 1) % len(self.sequence_map))
+        
+        # Extract second half + 1 frame for input/target shift
+        end_frame2 = start_frame2 + second_half_len + 1
+        sequence_codes2 = codes2[:, :self.n_q, start_frame2:end_frame2]
+        
+        # Convert codes to latents for both sequences
+        input_codes1 = sequence_codes1[:, :, :-1]  # Remove last frame for input
+        input_codes2 = sequence_codes2[:, :, :-1]  # Remove last frame for input
+        
+        latent_input1 = efficient_codes_to_latents(self.model, input_codes1)
+        latent_input2 = efficient_codes_to_latents(self.model, input_codes2)
+        
+        # Remove batch dimension and transpose for sequence-first format
+        latent_input1 = latent_input1.squeeze(0).transpose(0, 1)  # (first_half_len, 128)
+        latent_input2 = latent_input2.squeeze(0).transpose(0, 1)  # (second_half_len, 128)
+        
+        # Add noise if requested
+        if self.config.add_noise:
+            latent_input1 = self._add_noise(latent_input1, self.config.noise_weight)
+            latent_input2 = self._add_noise(latent_input2, self.config.noise_weight)
+        
+        # Preprocess latents
+        latent_input1 = preprocess_latents_for_RNN(latent_input1, self.clamp_val)
+        latent_input2 = preprocess_latents_for_RNN(latent_input2, self.clamp_val)
+        
+        # Combine latent inputs
+        combined_latent_input = torch.cat([latent_input1, latent_input2], dim=0)
+        
+        # Process target codes (shifted by one frame)
+        target_codes1 = sequence_codes1[:, :, 1:].squeeze(0).transpose(0, 1)  # (first_half_len, n_q)
+        target_codes2 = sequence_codes2[:, :, 1:].squeeze(0).transpose(0, 1)  # (second_half_len, n_q)
+        
+        # Combine target codes
+        combined_target_codes = torch.cat([target_codes1, target_codes2], dim=0)
+        
+        # Get conditioning parameters from both dataset rows
+        norm_params1 = self._parse_and_normalize_params_from_row(row1, row1['audio'])
+        norm_params2 = self._parse_and_normalize_params_from_row(row2, row2['audio'])
+        
+        if norm_params1 is None or norm_params2 is None:
+            # Skip this sample if parameters can't be parsed
+            return self.__getitem__((idx + 1) % len(self.sequence_map))
+        
+        # Create conditioning parameters for each half
+        cond_params1 = norm_params1.unsqueeze(0).expand(first_half_len, -1)
+        cond_params2 = norm_params2.unsqueeze(0).expand(second_half_len, -1)
+        
+        # Combine conditioning parameters
+        combined_cond_params = torch.cat([cond_params1, cond_params2], dim=0)
+        
+        # Combine latent input and conditioning parameters
+        input_tensor = torch.cat([combined_latent_input, combined_cond_params], dim=-1)
+        
+        return input_tensor, combined_target_codes.long()
+
+    ###########################################################################################
+    # This getitem() works perfectly well, but data files only have a single constant parameter
+    # The replacement (above) splits each item into a sequence with two halves constructed from two data files
+    ###########################################################################################
+    def __get___ONE____item__(self, idx):
         dataset_idx, start_frame, token_file_path = self.sequence_map[idx]
         row = self.dataset[dataset_idx]
         
