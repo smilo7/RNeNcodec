@@ -12,6 +12,8 @@ class GRUModelConfig:
    n_q: int = 8  # Number of quantization levels (codebooks)
    codebook_size: int = 1024  # Size of each codebook
    dropout: float = 0.1
+   inp_proportion = 1
+   cond_proportion = 1
 
 
 class RNN(nn.Module):
@@ -30,8 +32,12 @@ class RNN(nn.Module):
        ########## self.i2h = nn.Linear(self.input_size + self.cond_size, self.hidden_size)
        
        # Separate projections for data and conditional values to balance their influence and learning capacity
-       self.latent_proj = nn.Linear(self.input_size, self.hidden_size // 2)
-       self.cond_proj = nn.Linear(self.cond_size, self.hidden_size // 2)
+       lpn= config.inp_proportion* self.hidden_size // (config.inp_proportion+config.cond_proportion)
+       lcn= self.hidden_size - lpn
+       print(f"Latents embedded in {lpn} of the GRU input size of {self.hidden_size}")
+       print(f"Conditioning parameters embedded in {lcn} of the GRU input size of {self.hidden_size}")
+       self.latent_proj = nn.Linear(self.input_size, lpn)
+       self.cond_proj = nn.Linear(self.cond_size, lcn)
 
        
        # Same GRU backbone
@@ -65,8 +71,6 @@ class RNN(nn.Module):
            logits: List of tensors, each (batch_size, codebook_size)
            hidden: Updated GRU hidden state
        """
-       # Same projection as before
-       ################h1 = self.i2h(input)
        
        # Split the input
        latent_part = input[:, :self.input_size]           # (batch, 128)
@@ -74,7 +78,7 @@ class RNN(nn.Module):
 
        assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= {1.05}"
        
-       # Process separately
+       # Embed each separately to a different segment of the GRU input
        latent_h = self.latent_proj(latent_part)
        cond_h = self.cond_proj(cond_part)
        
@@ -82,8 +86,7 @@ class RNN(nn.Module):
        h1 = torch.cat([latent_h, cond_h], dim=-1)
 
        
-       
-       # Same GRU processing
+       # GRU processing of the combined input
        h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
        h_out = h_out.view(batch_size, -1)
        
