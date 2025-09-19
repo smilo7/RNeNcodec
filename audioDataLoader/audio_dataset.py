@@ -28,7 +28,7 @@ class LatentDatasetConfig:
     n_q: int = 4                                   # Number of codebooks to use
     clamp_val: float = 15
     filters: Optional[FilterSpec] = None           # e.g. {"foo": {4,6,7}, "bar": (0.0, 3.0), "label": {"A","B"}}
-
+    files_per_sequence: int = 2 
 
 def preprocess_latents_for_RNN(latents, clamp_val):
     """Convert latents to [-1,1] range with optional clamping"""
@@ -165,7 +165,19 @@ def _apply_hf_filters(ds, filters):
 
     return ds.filter(keep, batched=True)
 
-
+#----------------------------
+# Helper for creating ~equal length segments in sequences from different files
+def _split_even(total: int, k: int) -> List[int]:
+    """
+    Split 'total' into k integers as evenly as possible.
+    Earlier segments get the +1 if there's a remainder.
+    E.g., total=7, k=3 -> [3, 2, 2]
+    """
+    k = max(1, int(k))
+    base = total // k
+    r = total % k
+    return [base + (1 if i < r else 0) for i in range(k)]
+    
 ###############################################################################
 #################    THE CUSTOM DATASET CLASS ITSELF   ########################
 ###############################################################################
@@ -197,6 +209,8 @@ class EnCodecLatentDataset(Dataset):
         # The dataset path contains the .ecdc files
         self.dataset_root = Path(config.dataset_path)
 
+        self.files_per_sequence = getattr(config, "files_per_sequence", 2)
+
         # >>> NEW: apply subset filters once, before building the sequence map
         total_before = len(self.dataset)
 
@@ -210,134 +224,220 @@ class EnCodecLatentDataset(Dataset):
         # <<<
         
         # Build sequence map: (dataset_idx, start_frame)
+        # Build sequence map: (dataset_idx, start_frame, token_file_path)
         self.sequence_map = []
+        
+        # How many files are combined per training item?
+        k = max(1, int(getattr(self.config, "files_per_sequence", 2)))
+        # Longest segment we might take from any one file
+        longest_seg = (self.sequence_length + k - 1) // k   # ceil(sequence_length / k)
+        # Need +1 for next-step target shift during slicing
+        needed = longest_seg + 1
         
         for dataset_idx, row in enumerate(self.dataset):
             # The 'audio' field might already contain the split folder path
             audio_path = row['audio']
-            
-            # Try different path combinations
+        
             possible_paths = [
-                self.dataset_root / audio_path,  # If audio_path already includes split
-                self.dataset_root / split / audio_path,  # If we need to add split
-                Path(audio_path),  # If it's already an absolute path
+                self.dataset_root / audio_path,            # audio already includes split
+                self.dataset_root / self.split / audio_path,  # add split if needed
+                Path(audio_path),                          # absolute path
             ]
-            
             token_file_path = None
             for path in possible_paths:
                 if path.exists():
                     token_file_path = path
                     break
-            
             if token_file_path is None:
                 print(f"Warning: Could not find audio file for any of these paths:")
                 for path in possible_paths:
                     print(f"  - {path}")
                 continue
-            
+        
             # Load codes to get number of frames
             codes = self._load_ecdc_codes(token_file_path)
-            
             if codes is None:
                 continue
-                
-            num_frames = codes.shape[-1]  # Shape is (1, n_q, num_frames)
-            
+        
+            num_frames = codes.shape[-1]  # (1, n_q, T)
+        
             # Create sequence map entries
-            if num_frames > self.sequence_length:
-                for start_frame in range(num_frames - self.sequence_length):
+            if num_frames >= needed:
+                # valid starts are [0 .. num_frames - needed]
+                max_start = num_frames - needed + 1
+                for start_frame in range(max_start):
                     self.sequence_map.append((dataset_idx, start_frame, token_file_path))
         
         print(f"Loaded {len(self.sequence_map)} sequences from {len(self.dataset)} files in '{split}' split")
 
     def __len__(self):
         return len(self.sequence_map)
-    
+
     def __getitem__(self, idx):
-        # Get the first sequence (first half)
-        dataset_idx1, start_frame1, token_file_path1 = self.sequence_map[idx]
-        row1 = self.dataset[dataset_idx1]
+        # How many separate files to mix into one sequence
+        k = max(1, int(getattr(self.config, "files_per_sequence", 2)))
+    
+        # Choose k sequences: 1 anchored at idx + (k-1) random distinct picks (when possible)
+        picks = [(self.sequence_map[idx], idx)]
+        if len(self.sequence_map) > 1 and k > 1:
+            # Sample without replacement, avoiding 'idx' if possible
+            # Build a pool of indices excluding idx (if there are enough)
+            pool = list(range(len(self.sequence_map)))
+            try:
+                pool.remove(idx)
+            except ValueError:
+                pass
+            need = min(k - 1, len(pool))
+            extra_idxs = random.sample(pool, need)
+            picks.extend([(self.sequence_map[j], j) for j in extra_idxs])
+    
+            # If dataset is tiny and we still need more, allow repeats
+            while len(picks) < k:
+                j = random.randint(0, len(self.sequence_map) - 1)
+                picks.append((self.sequence_map[j], j))
+    
+        # Split total sequence_length across k segments as evenly as possible
+        seg_lens = _split_even(self.sequence_length, k)
+    
+        latent_chunks = []
+        target_chunks = []
+        cond_chunks = []
+    
+        for seg_len, (seq_entry, seq_idx) in zip(seg_lens, picks):
+            dataset_idx, start_frame, token_file_path = seq_entry
+            row = self.dataset[dataset_idx]
+    
+            # Load codes
+            codes = self._load_ecdc_codes(token_file_path)
+            if codes is None:
+                # Try next index if any, otherwise fallback to another sample
+                return self.__getitem__((idx + 1) % len(self.sequence_map))
+    
+            # Slice seg_len + 1 frames for input/target shift
+            end_frame = start_frame + seg_len + 1
+            sequence_codes = codes[:, :self.n_q, start_frame:end_frame]  # (1, n_q, seg_len+1)
+    
+            # Input codes (drop last frame), then to latents
+            input_codes = sequence_codes[:, :, :-1]                       # (1, n_q, seg_len)
+            latent_in = efficient_codes_to_latents(self.model, input_codes)  # (1, 128, seg_len)
+    
+            # (T, 128)
+            latent_in = latent_in.squeeze(0).transpose(0, 1)
+    
+            # Optional noise + preprocess
+            if self.config.add_noise:
+                latent_in = self._add_noise(latent_in, self.config.noise_weight)
+            latent_in = preprocess_latents_for_RNN(latent_in, self.clamp_val)
+    
+            # Targets: codes shifted by 1
+            targets = sequence_codes[:, :, 1:].squeeze(0).transpose(0, 1)  # (seg_len, n_q)
+    
+            # Conditioning for this segment
+            norm_params = self._parse_and_normalize_params_from_row(row, row['audio'])
+            if norm_params is None:
+                return self.__getitem__((idx + 1) % len(self.sequence_map))
+            cond = norm_params.unsqueeze(0).expand(seg_len, -1)            # (seg_len, P)
+    
+            latent_chunks.append(latent_in)
+            target_chunks.append(targets)
+            cond_chunks.append(cond)
+    
+        # Concatenate along time
+        latent_all = torch.cat(latent_chunks, dim=0)         # (L, 128)
+        targets_all = torch.cat(target_chunks, dim=0)        # (L, n_q)
+        cond_all = torch.cat(cond_chunks, dim=0)             # (L, P)
+    
+        # Final input = latents || cond
+        input_tensor = torch.cat([latent_all, cond_all], dim=-1)  # (L, 128+P)
+    
+        return input_tensor, targets_all.long()
+    
+    
+    # def __getitem__(self, idx):
+    #     # Get the first sequence (first half)
+    #     dataset_idx1, start_frame1, token_file_path1 = self.sequence_map[idx]
+    #     row1 = self.dataset[dataset_idx1]
         
-        # Get a random second sequence (second half)
-        random_idx = random.randint(0, len(self.sequence_map) - 1)
-        dataset_idx2, start_frame2, token_file_path2 = self.sequence_map[random_idx]
-        row2 = self.dataset[dataset_idx2]
+    #     # Get a random second sequence (second half)
+    #     random_idx = random.randint(0, len(self.sequence_map) - 1)
+    #     dataset_idx2, start_frame2, token_file_path2 = self.sequence_map[random_idx]
+    #     row2 = self.dataset[dataset_idx2]
         
-        # Calculate half sequence length
-        half_seq_len = self.sequence_length // 2
-        remainder = self.sequence_length % 2  # Handle odd sequence lengths
+    #     # Calculate half sequence length
+    #     half_seq_len = self.sequence_length // 2
+    #     remainder = self.sequence_length % 2  # Handle odd sequence lengths
         
-        # First half length (gets the extra frame if sequence_length is odd)
-        first_half_len = half_seq_len + remainder
-        second_half_len = half_seq_len
+    #     # First half length (gets the extra frame if sequence_length is odd)
+    #     first_half_len = half_seq_len + remainder
+    #     second_half_len = half_seq_len
         
-        # Load and process first sequence
-        codes1 = self._load_ecdc_codes(token_file_path1)
-        if codes1 is None:
-            return self.__getitem__((idx + 1) % len(self.sequence_map))
+    #     # Load and process first sequence
+    #     codes1 = self._load_ecdc_codes(token_file_path1)
+    #     if codes1 is None:
+    #         return self.__getitem__((idx + 1) % len(self.sequence_map))
         
-        # Extract first half + 1 frame for input/target shift
-        end_frame1 = start_frame1 + first_half_len + 1
-        sequence_codes1 = codes1[:, :self.n_q, start_frame1:end_frame1]
+    #     # Extract first half + 1 frame for input/target shift
+    #     end_frame1 = start_frame1 + first_half_len + 1
+    #     sequence_codes1 = codes1[:, :self.n_q, start_frame1:end_frame1]
         
-        # Load and process second sequence  
-        codes2 = self._load_ecdc_codes(token_file_path2)
-        if codes2 is None:
-            return self.__getitem__((idx + 1) % len(self.sequence_map))
+    #     # Load and process second sequence  
+    #     codes2 = self._load_ecdc_codes(token_file_path2)
+    #     if codes2 is None:
+    #         return self.__getitem__((idx + 1) % len(self.sequence_map))
         
-        # Extract second half + 1 frame for input/target shift
-        end_frame2 = start_frame2 + second_half_len + 1
-        sequence_codes2 = codes2[:, :self.n_q, start_frame2:end_frame2]
+    #     # Extract second half + 1 frame for input/target shift
+    #     end_frame2 = start_frame2 + second_half_len + 1
+    #     sequence_codes2 = codes2[:, :self.n_q, start_frame2:end_frame2]
         
-        # Convert codes to latents for both sequences
-        input_codes1 = sequence_codes1[:, :, :-1]  # Remove last frame for input
-        input_codes2 = sequence_codes2[:, :, :-1]  # Remove last frame for input
+    #     # Convert codes to latents for both sequences
+    #     input_codes1 = sequence_codes1[:, :, :-1]  # Remove last frame for input
+    #     input_codes2 = sequence_codes2[:, :, :-1]  # Remove last frame for input
         
-        latent_input1 = efficient_codes_to_latents(self.model, input_codes1)
-        latent_input2 = efficient_codes_to_latents(self.model, input_codes2)
+    #     latent_input1 = efficient_codes_to_latents(self.model, input_codes1)
+    #     latent_input2 = efficient_codes_to_latents(self.model, input_codes2)
         
-        # Remove batch dimension and transpose for sequence-first format
-        latent_input1 = latent_input1.squeeze(0).transpose(0, 1)  # (first_half_len, 128)
-        latent_input2 = latent_input2.squeeze(0).transpose(0, 1)  # (second_half_len, 128)
+    #     # Remove batch dimension and transpose for sequence-first format
+    #     latent_input1 = latent_input1.squeeze(0).transpose(0, 1)  # (first_half_len, 128)
+    #     latent_input2 = latent_input2.squeeze(0).transpose(0, 1)  # (second_half_len, 128)
         
-        # Add noise if requested
-        if self.config.add_noise:
-            latent_input1 = self._add_noise(latent_input1, self.config.noise_weight)
-            latent_input2 = self._add_noise(latent_input2, self.config.noise_weight)
+    #     # Add noise if requested
+    #     if self.config.add_noise:
+    #         latent_input1 = self._add_noise(latent_input1, self.config.noise_weight)
+    #         latent_input2 = self._add_noise(latent_input2, self.config.noise_weight)
         
-        # Preprocess latents
-        latent_input1 = preprocess_latents_for_RNN(latent_input1, self.clamp_val)
-        latent_input2 = preprocess_latents_for_RNN(latent_input2, self.clamp_val)
+    #     # Preprocess latents
+    #     latent_input1 = preprocess_latents_for_RNN(latent_input1, self.clamp_val)
+    #     latent_input2 = preprocess_latents_for_RNN(latent_input2, self.clamp_val)
         
-        # Combine latent inputs
-        combined_latent_input = torch.cat([latent_input1, latent_input2], dim=0)
+    #     # Combine latent inputs
+    #     combined_latent_input = torch.cat([latent_input1, latent_input2], dim=0)
         
-        # Process target codes (shifted by one frame)
-        target_codes1 = sequence_codes1[:, :, 1:].squeeze(0).transpose(0, 1)  # (first_half_len, n_q)
-        target_codes2 = sequence_codes2[:, :, 1:].squeeze(0).transpose(0, 1)  # (second_half_len, n_q)
+    #     # Process target codes (shifted by one frame)
+    #     target_codes1 = sequence_codes1[:, :, 1:].squeeze(0).transpose(0, 1)  # (first_half_len, n_q)
+    #     target_codes2 = sequence_codes2[:, :, 1:].squeeze(0).transpose(0, 1)  # (second_half_len, n_q)
         
-        # Combine target codes
-        combined_target_codes = torch.cat([target_codes1, target_codes2], dim=0)
+    #     # Combine target codes
+    #     combined_target_codes = torch.cat([target_codes1, target_codes2], dim=0)
         
-        # Get conditioning parameters from both dataset rows
-        norm_params1 = self._parse_and_normalize_params_from_row(row1, row1['audio'])
-        norm_params2 = self._parse_and_normalize_params_from_row(row2, row2['audio'])
+    #     # Get conditioning parameters from both dataset rows
+    #     norm_params1 = self._parse_and_normalize_params_from_row(row1, row1['audio'])
+    #     norm_params2 = self._parse_and_normalize_params_from_row(row2, row2['audio'])
         
-        if norm_params1 is None or norm_params2 is None:
-            # Skip this sample if parameters can't be parsed
-            return self.__getitem__((idx + 1) % len(self.sequence_map))
+    #     if norm_params1 is None or norm_params2 is None:
+    #         # Skip this sample if parameters can't be parsed
+    #         return self.__getitem__((idx + 1) % len(self.sequence_map))
         
-        # Create conditioning parameters for each half
-        cond_params1 = norm_params1.unsqueeze(0).expand(first_half_len, -1)
-        cond_params2 = norm_params2.unsqueeze(0).expand(second_half_len, -1)
+    #     # Create conditioning parameters for each half
+    #     cond_params1 = norm_params1.unsqueeze(0).expand(first_half_len, -1)
+    #     cond_params2 = norm_params2.unsqueeze(0).expand(second_half_len, -1)
         
-        # Combine conditioning parameters
-        combined_cond_params = torch.cat([cond_params1, cond_params2], dim=0)
+    #     # Combine conditioning parameters
+    #     combined_cond_params = torch.cat([cond_params1, cond_params2], dim=0)
         
-        # Combine latent input and conditioning parameters
-        input_tensor = torch.cat([combined_latent_input, combined_cond_params], dim=-1)
+    #     # Combine latent input and conditioning parameters
+    #     input_tensor = torch.cat([combined_latent_input, combined_cond_params], dim=-1)
         
-        return input_tensor, combined_target_codes.long()
+    #     return input_tensor, combined_target_codes.long()
 
     ###########################################################################################
     # This getitem() works perfectly well, but data files only have a single constant parameter

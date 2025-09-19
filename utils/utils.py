@@ -111,7 +111,7 @@ def plot_condition_tensor(cond_tensor: torch.FloatTensor, sr: int):
     T, p = cond_tensor.shape
     time = torch.arange(T) / sr
 
-    plt.figure(figsize=(12, 4))
+    plt.figure(figsize=(20, 5))
     for i in range(p):
         plt.plot(time, cond_tensor[:, i], label=f'Param {i+1}')
     
