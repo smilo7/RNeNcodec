@@ -106,7 +106,7 @@ def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top
 
     hidden = model.init_hidden(batch_size=1)
     for i in range(len(warmup_full_input)):
-        _, hidden = model(warmup_full_input[i].unsqueeze(0), hidden, encodec_model=encodec_model, batch_size=1)
+        _, hidden = model(warmup_full_input[i].unsqueeze(0), hidden,  batch_size=1)
 
     # Get the last latent for starting generation
     current_latent = warmup_latents[-1].unsqueeze(0)  # (1, 128)
@@ -128,7 +128,7 @@ def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top
                 # No conditioning
                 next_input_full = current_latent  # (1, 128)
 
-            logits_list, hidden = model(next_input_full, hidden, encodec_model=encodec_model, batch_size=1)
+            logits_list, hidden = model(next_input_full, hidden, batch_size=1)
 
             # Transform outputs to next input using the extracted function
             current_latent, sampled_codes = transform_outputs_to_inputs(
