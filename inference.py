@@ -20,48 +20,48 @@ from audioDataLoader.audio_dataset import latents_to_audio_simple, efficient_cod
 
 import time
 
-def transform_outputs_to_inputs(logits_list, encodec_model, clamp_val, top_n=3, temperature=1.0, codebook_size=1024, n_q=4):
-    """
-    Transform model outputs (logits) into the next input (128D latent).
+# def transform_outputs_to_inputs(logits_list, encodec_model, clamp_val, top_n=3, temperature=1.0, codebook_size=1024, n_q=4):
+#     """
+#     Transform model outputs (logits) into the next input (128D latent).
     
-    Args:
-        logits_list: List of logit tensors, one per quantizer
-        encodec_model: EnCodec model for code->latent conversion
-        clamp_val (float) - clamp latents (produced by encodec token decoding) in [-clamp_val, clampval], the map to [-1,1] for input to model next step
-        top_n: Number of top predictions to sample from
-        temperature: Sampling temperature
-        codebook_size: Size of each codebook
-        n_q: Number of quantizers
+#     Args:
+#         logits_list: List of logit tensors, one per quantizer
+#         encodec_model: EnCodec model for code->latent conversion
+#         clamp_val (float) - clamp latents (produced by encodec token decoding) in [-clamp_val, clampval], the map to [-1,1] for input to model next step
+#         top_n: Number of top predictions to sample from
+#         temperature: Sampling temperature
+#         codebook_size: Size of each codebook
+#         n_q: Number of quantizers
     
-    Returns:
-        torch.Tensor: Next input latent of shape (1, 128)
-    """
-    device = logits_list[0].device
-    encodec_model.to(device)
-    sampled_codes = []
+#     Returns:
+#         torch.Tensor: Next input latent of shape (1, 128)
+#     """
+#     device = logits_list[0].device
+#     encodec_model.to(device)
+#     sampled_codes = []
     
-    for j in range(n_q):
-        # Apply temperature and get top-k
-        logits_j = logits_list[j].div(temperature).squeeze()  # (codebook_size,)
-        top_n_logits, top_n_indices = torch.topk(logits_j, top_n)
-        top_n_probs = F.softmax(top_n_logits, dim=-1)
+#     for j in range(n_q):
+#         # Apply temperature and get top-k
+#         logits_j = logits_list[j].div(temperature).squeeze()  # (codebook_size,)
+#         top_n_logits, top_n_indices = torch.topk(logits_j, top_n)
+#         top_n_probs = F.softmax(top_n_logits, dim=-1)
         
-        # Sample from top-k
-        try:
-            sampled_relative_idx = torch.multinomial(top_n_probs, 1).squeeze()
-            sampled_code = top_n_indices[sampled_relative_idx]
-            sampled_codes.append(sampled_code.item())
-        except Exception as e:
-            print(f"Sampling error for quantizer {j}: {e}")
-            # Fallback to random sampling
-            sampled_codes.append(torch.randint(0, codebook_size, (1,)).item())
+#         # Sample from top-k
+#         try:
+#             sampled_relative_idx = torch.multinomial(top_n_probs, 1).squeeze()
+#             sampled_code = top_n_indices[sampled_relative_idx]
+#             sampled_codes.append(sampled_code.item())
+#         except Exception as e:
+#             print(f"Sampling error for quantizer {j}: {e}")
+#             # Fallback to random sampling
+#             sampled_codes.append(torch.randint(0, codebook_size, (1,)).item())
     
-    # Convert sampled codes back to latent - CREATE TENSOR ON CORRECT DEVICE
-    codes_tensor = torch.tensor(sampled_codes, device=device).unsqueeze(0).unsqueeze(-1)  # (1, n_q, 1)
-    next_latent = efficient_codes_to_latents(encodec_model, codes_tensor).squeeze(0).squeeze(-1).unsqueeze(0)  # (1, 128)
-    next_latent = preprocess_latents_for_RNN(next_latent, clamp_val)
+#     # Convert sampled codes back to latent - CREATE TENSOR ON CORRECT DEVICE
+#     codes_tensor = torch.tensor(sampled_codes, device=device).unsqueeze(0).unsqueeze(-1)  # (1, n_q, 1)
+#     next_latent = efficient_codes_to_latents(encodec_model, codes_tensor).squeeze(0).squeeze(-1).unsqueeze(0)  # (1, 128)
+#     next_latent = preprocess_latents_for_RNN(next_latent, clamp_val)
     
-    return next_latent, sampled_codes
+#     return next_latent, sampled_codes
 
 
 def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top_n=3, temperature=1.0, include_warmup_audio=False) :
@@ -106,7 +106,12 @@ def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top
 
     hidden = model.init_hidden(batch_size=1)
     for i in range(len(warmup_full_input)):
-        _, hidden = model(warmup_full_input[i].unsqueeze(0), hidden,  batch_size=1)
+        #_, hidden = model(warmup_full_input[i].unsqueeze(0), hidden,  batch_size=1)
+        _, hidden, _, _ = model(
+            warmup_full_input[i].unsqueeze(0), 
+            hidden,  
+            batch_size=1)
+        
 
     # Get the last latent for starting generation
     current_latent = warmup_latents[-1].unsqueeze(0)  # (1, 128)
@@ -119,22 +124,35 @@ def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top
     start_time = time.monotonic()
     
     with torch.no_grad():
+        model.eval()
+    
+        #-------------------------------------------------------------------------------
         for i in range(generation_length):
-            # Handle conditioning for this step
+            # Build input (latent + cond)
             if cond_size > 0 and cond_seq is not None:
-                current_cond_vec = cond_seq[i].unsqueeze(0).to(device)  # (1, cond_size)
-                next_input_full = torch.cat([current_latent, current_cond_vec], dim=-1)  # (1, 128 + cond_size)
+                current_cond_vec = cond_seq[i].unsqueeze(0).to(device)      # (1, cond_size)
+                next_input_full   = torch.cat([current_latent, current_cond_vec], dim=-1)  # (1, 128 + cond)
             else:
-                # No conditioning
-                next_input_full = current_latent  # (1, 128)
-
-            logits_list, hidden = model(next_input_full, hidden, batch_size=1)
-
-            # Transform outputs to next input using the extracted function
-            current_latent, sampled_codes = transform_outputs_to_inputs(
-                logits_list, encodec_model, clamp_val, top_n, temperature, codebook_size, n_q
+                next_input_full   = current_latent                          # (1, 128)
+    
+            # One call -> one set of tokens (no resampling)
+            logits_list, hidden, sampled_indices, step_latent = model(
+                next_input_full,
+                hidden,
+                use_teacher_forcing=False,
+                temperature=temperature,
+                batch_size=1,
+                sample_mode="sample" if top_n and top_n > 0 else "argmax",  # keep your top-k/temperature behavior
+                top_n=top_n,
+                return_step_latent=True
             )
-            generated_codes.append(sampled_codes)
+    
+            # Use the exact latent produced by those sampled tokens
+            current_latent = preprocess_latents_for_RNN(step_latent, clamp_val)  # (1, 128)
+    
+            # Save the exact tokens used this step
+            generated_codes.append(sampled_indices.squeeze(0).tolist())  # (n_q,)
+    #-------------------------------------------------------------------------------
 
     rnnelapsed_time = time.monotonic() - start_time
     print(f"Latent generation complete. RNN time to generate: {rnnelapsed_time:.2f}. Converting to audio...")

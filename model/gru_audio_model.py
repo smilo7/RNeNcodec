@@ -80,76 +80,180 @@ class RNN(nn.Module):
            elif "bias" in name:
                nn.init.constant_(param, 0.0)
 
-   def forward(self, input, hidden, target_codebook_latents=None, use_teacher_forcing=False, 
-               temperature=1.0, batch_size=1):
-       """
-       Args:
-           input: (batch_size, input_size + cond_size) - 128D latent + conditioning
-           hidden: GRU hidden state
-           target_codebook_latents: Optional[List[Tensor]] - 128D latents for each codebook for teacher forcing
-           use_teacher_forcing: bool - whether to use teacher forcing or autoregressive prediction
-           encodec_model: EnCodec model for decoding predicted tokens to latents (needed for autoregressive mode)
-           temperature: float - sampling temperature for autoregressive mode
-           batch_size: batch size
+#    def forward(self, input, hidden, target_codebook_latents=None, use_teacher_forcing=False, 
+#                temperature=1.0, batch_size=1):
+#        """
+#        Args:
+#            input: (batch_size, input_size + cond_size) - 128D latent + conditioning
+#            hidden: GRU hidden state
+#            target_codebook_latents: Optional[List[Tensor]] - 128D latents for each codebook for teacher forcing
+#            use_teacher_forcing: bool - whether to use teacher forcing or autoregressive prediction
+#            encodec_model: EnCodec model for decoding predicted tokens to latents (needed for autoregressive mode)
+#            temperature: float - sampling temperature for autoregressive mode
+#            batch_size: batch size
            
-       Returns:
-           logits: List of tensors, each (batch_size, codebook_size)
-           hidden: Updated GRU hidden state
-       """
+#        Returns:
+#            logits: List of tensors, each (batch_size, codebook_size)
+#            hidden: Updated GRU hidden state
+#        """
        
-       # Split the input and process through GRU (same as before)
-       latent_part = input[:, :self.input_size]           # (batch, 128)
-       cond_part = input[:, self.input_size:]             # (batch, cond_size)
+#        # Split the input and process through GRU (same as before)
+#        latent_part = input[:, :self.input_size]           # (batch, 128)
+#        cond_part = input[:, self.input_size:]             # (batch, cond_size)
 
-       assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= {1.05}"
+#        assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= {1.05}"
        
-       # Embed each separately to a different segment of the GRU input
-       latent_h = self.latent_proj(latent_part)
-       cond_h = self.cond_proj(cond_part)
+#        # Embed each separately to a different segment of the GRU input
+#        latent_h = self.latent_proj(latent_part)
+#        cond_h = self.cond_proj(cond_part)
        
-       # Combine
-       h1 = torch.cat([latent_h, cond_h], dim=-1)
+#        # Combine
+#        h1 = torch.cat([latent_h, cond_h], dim=-1)
        
-       # GRU processing of the combined input
-       h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
-       h_out = h_out.view(batch_size, -1)
+#        # GRU processing of the combined input
+#        h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
+#        h_out = h_out.view(batch_size, -1)
        
-       # Sequential codebook prediction
-       logits = []
-       cumulative_latent = torch.zeros(batch_size, self.input_size, device=h_out.device)  # Sum of lower codebook latents
+#        # Sequential codebook prediction
+#        logits = []
+#        cumulative_latent = torch.zeros(batch_size, self.input_size, device=h_out.device)  # Sum of lower codebook latents
        
-       for codebook_idx in range(self.n_q):
-           # Prepare input for this codebook predictor
-           decoder_input = torch.cat([h_out, cumulative_latent], dim=-1)
+#        for codebook_idx in range(self.n_q):
+#            # Prepare input for this codebook predictor
+#            decoder_input = torch.cat([h_out, cumulative_latent], dim=-1)
            
-           # Predict logits for this codebook
-           codebook_logits = self.decoders[codebook_idx](decoder_input)
-           logits.append(codebook_logits)
+#            # Predict logits for this codebook
+#            codebook_logits = self.decoders[codebook_idx](decoder_input)
+#            logits.append(codebook_logits)
            
-           # Update cumulative latent for next codebook
-           if codebook_idx < self.n_q - 1:  # Don't need to update after last codebook
-               if use_teacher_forcing and target_codebook_latents is not None:
-                   # Teacher forcing: use ground truth latent
-                   cumulative_latent = cumulative_latent + target_codebook_latents[codebook_idx]
-               else:
+#            # Update cumulative latent for next codebook
+#            if codebook_idx < self.n_q - 1:  # Don't need to update after last codebook
+#                if use_teacher_forcing and target_codebook_latents is not None:
+#                    # Teacher forcing: use ground truth latent
+#                    cumulative_latent = cumulative_latent + target_codebook_latents[codebook_idx]
+#                else:
                    
-                   # Sample from the predicted distribution
-                   probs = torch.softmax(codebook_logits / temperature, dim=-1)
-                   sampled_tokens = torch.multinomial(probs, 1).squeeze(-1)  # (batch_size,)
+#                    # Sample from the predicted distribution
+#                    probs = torch.softmax(codebook_logits / temperature, dim=-1)
+#                    sampled_tokens = torch.multinomial(probs, 1).squeeze(-1)  # (batch_size,)
 
 
-                   decoded_latent = self._code_to_latent_level(
-                            codebook_idx,
-                            sampled_tokens,
-                            out_device=h_out.device
-                   )  # (batch_size, 128)
+#                    decoded_latent = self._code_to_latent_level(
+#                             codebook_idx,
+#                             sampled_tokens,
+#                             out_device=h_out.device
+#                    )  # (batch_size, 128)
 
 
 
-                   cumulative_latent = cumulative_latent + decoded_latent
+#                    cumulative_latent = cumulative_latent + decoded_latent
        
-       return logits, hidden
+#        return logits, hidden
    
+#---------------------           Unified sampling   ---------------------------------
+
+   def forward(self,
+            input,
+            hidden,
+            target_codebook_latents=None,
+            use_teacher_forcing=False,
+            temperature=1.0,
+            batch_size=1,
+            *,
+            sample_mode: str = "sample",      # NEW: "argmax" | "gumbel" | "sample"
+            top_n: int | None = None,         # NEW: optional top-k restriction
+            return_step_latent: bool = True   # NEW: return sum of per-level latents this step
+            ):
+        """
+        Args:
+            input: (batch_size, input_size + cond_size) - 128D latent + conditioning
+            hidden: GRU hidden state
+            target_codebook_latents: Optional[List[Tensor]] - 128D latents per codebook (teacher forcing)
+            use_teacher_forcing: bool - whether to use teacher forcing
+            temperature: float - sampling temperature (used for gumbel/sample)
+            batch_size: int
+            sample_mode: "argmax" | "gumbel" | "sample"
+            top_n: if set, restrict sampling to top_n logits (top-k)
+            return_step_latent: also return (batch, 128) sum of all codebook latents for this step
+
+        Returns:
+            logits_list: List[Tensor], each (batch_size, codebook_size)
+            hidden: updated GRU hidden
+            sampled_indices: (batch_size, n_q) LongTensor of the ONE set of tokens used (None if pure TF)
+            step_latent: (batch_size, 128) sum of per-level latents for this step (or None if disabled)
+        """
+        # Split the input and process through GRU
+        latent_part = input[:, :self.input_size]           # (batch, 128)
+        cond_part   = input[:, self.input_size:]           # (batch, cond_size)
+
+        assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= 1.05"
+
+        latent_h = self.latent_proj(latent_part)
+        cond_h   = self.cond_proj(cond_part)
+        h1 = torch.cat([latent_h, cond_h], dim=-1)
+
+        h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
+        h_out = h_out.view(batch_size, -1)
+
+        # Sequential codebook prediction with unified sampling
+        logits = []
+        device = h_out.device
+        cumulative_latent = torch.zeros(batch_size, self.input_size, device=device)  # running 128D sum
+        sampled_tokens_list = []   # collect per-q sampled indices (B,)
+
+        for codebook_idx in range(self.n_q):
+            decoder_input = torch.cat([h_out, cumulative_latent], dim=-1)
+            codebook_logits = self.decoders[codebook_idx](decoder_input)   # (B, K)
+            logits.append(codebook_logits)
+
+            if use_teacher_forcing and target_codebook_latents is not None:
+                sampled_tokens_list.append(None)
+                if codebook_idx < self.n_q - 1:
+                    cumulative_latent = cumulative_latent + target_codebook_latents[codebook_idx]  # (B,128)
+            else:
+                # --- sample ONCE here and reuse it everywhere else ---
+                idx_q = self._select_tokens(
+                    codebook_logits,
+                    mode=sample_mode,
+                    temperature=temperature,
+                    top_n=top_n
+                )  # (B,)
+                sampled_tokens_list.append(idx_q)
+
+                if codebook_idx < self.n_q - 1:
+                    decoded_latent = self._code_to_latent_level(
+                        codebook_idx,
+                        idx_q,
+                        out_device=device
+                    )  # (B,128)
+                    cumulative_latent = cumulative_latent + decoded_latent
+
+        # Package sampled indices (B, n_q) or None if TF
+        sampled_indices = None
+        if any(t is not None for t in sampled_tokens_list):
+            sampled_indices = torch.stack([t if t is not None else torch.full((batch_size,), -1, device=device, dtype=torch.long)
+                                        for t in sampled_tokens_list], dim=1)  # (B, n_q)
+
+        # Compute per-step latent sum if requested
+        step_latent = None
+        if return_step_latent:
+            if use_teacher_forcing and target_codebook_latents is not None:
+                step_latent = torch.stack(target_codebook_latents, dim=0).sum(dim=0)  # (B,128)
+            else:
+                if sampled_indices is None:
+                    step_latent = torch.zeros(batch_size, self.input_size, device=device)
+                else:
+                    step_latent = torch.zeros(batch_size, self.input_size, device=device)
+                    for q in range(self.n_q):
+                        idx_q = sampled_indices[:, q]  # (B,)
+                        if (idx_q >= 0).any():
+                            e_q = self._code_to_latent_level(q, idx_q.clamp_min(0), out_device=device)  # (B,128)
+                            if (idx_q < 0).any():
+                                mask = (idx_q >= 0).float().unsqueeze(-1)
+                                e_q = e_q * mask
+                            step_latent = step_latent + e_q
+
+        return logits, hidden, sampled_indices, step_latent
 
 ####################################################################
 #  Helpers
@@ -158,33 +262,34 @@ class RNN(nn.Module):
    def _select_tokens(self, logits_k: torch.Tensor, *, mode: str = "gumbel",
                    temperature: float = 1.0, top_n: int | None = None) -> torch.LongTensor:
         """
-        Pick hard token indices from logits (…, K) once.
+        Select hard token indices from logits (..., K) once.
         mode: "argmax" | "gumbel" | "sample"
-        top_n: if set, restricts sampling to top_n logits (nucleus-like top-k).
+        top_n: if set, restrict choice to top_n logits (top-k sampling).
         returns: indices with shape logits_k.shape[:-1]
         """
         K = logits_k.size(-1)
         if mode == "argmax":
             return logits_k.argmax(dim=-1)
-    
-        if top_n is not None and top_n < K:
-            # mask everything but top_n
+
+        # optional top-k mask
+        if top_n is not None and 1 <= top_n < K:
             topv, topi = torch.topk(logits_k, k=top_n, dim=-1)
-            mask = torch.full_like(logits_k, float("-inf"))
-            logits_k = mask.scatter(-1, topi, topv)
-    
+            masked = torch.full_like(logits_k, float("-inf"))
+            logits_k = masked.scatter(-1, topi, topv)
+
         if mode == "gumbel":
-            g = -torch.log(-torch.rand_like(logits_k).clamp_min_(1e-9)).clamp_min_(1e-9)
+            # Gumbel(0,1) noise
+            u = torch.rand_like(logits_k).clamp_(1e-6, 1 - 1e-6)
+            g = -torch.log(-torch.log(u))
             return ((logits_k + g) / max(temperature, 1e-6)).argmax(dim=-1)
-    
+
         if mode == "sample":
             probs = F.softmax(logits_k / max(temperature, 1e-6), dim=-1)
-            # multinomial expects 2D; flatten then unflatten
             flat = probs.reshape(-1, probs.size(-1))
             idx = torch.multinomial(flat, num_samples=1).squeeze(-1)
             return idx.view(probs.shape[:-1])
-    
-        raise ValueError(f"Unknown mode={mode}")
+
+        raise ValueError(f"Unknown sample_mode={mode!r}")
         
    def _build_effective_codebooks(self, encodec_model: nn.Module) -> torch.Tensor:
         device = next(encodec_model.parameters()).device
