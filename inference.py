@@ -20,50 +20,6 @@ from audioDataLoader.audio_dataset import latents_to_audio_simple, efficient_cod
 
 import time
 
-# def transform_outputs_to_inputs(logits_list, encodec_model, clamp_val, top_n=3, temperature=1.0, codebook_size=1024, n_q=4):
-#     """
-#     Transform model outputs (logits) into the next input (128D latent).
-    
-#     Args:
-#         logits_list: List of logit tensors, one per quantizer
-#         encodec_model: EnCodec model for code->latent conversion
-#         clamp_val (float) - clamp latents (produced by encodec token decoding) in [-clamp_val, clampval], the map to [-1,1] for input to model next step
-#         top_n: Number of top predictions to sample from
-#         temperature: Sampling temperature
-#         codebook_size: Size of each codebook
-#         n_q: Number of quantizers
-    
-#     Returns:
-#         torch.Tensor: Next input latent of shape (1, 128)
-#     """
-#     device = logits_list[0].device
-#     encodec_model.to(device)
-#     sampled_codes = []
-    
-#     for j in range(n_q):
-#         # Apply temperature and get top-k
-#         logits_j = logits_list[j].div(temperature).squeeze()  # (codebook_size,)
-#         top_n_logits, top_n_indices = torch.topk(logits_j, top_n)
-#         top_n_probs = F.softmax(top_n_logits, dim=-1)
-        
-#         # Sample from top-k
-#         try:
-#             sampled_relative_idx = torch.multinomial(top_n_probs, 1).squeeze()
-#             sampled_code = top_n_indices[sampled_relative_idx]
-#             sampled_codes.append(sampled_code.item())
-#         except Exception as e:
-#             print(f"Sampling error for quantizer {j}: {e}")
-#             # Fallback to random sampling
-#             sampled_codes.append(torch.randint(0, codebook_size, (1,)).item())
-    
-#     # Convert sampled codes back to latent - CREATE TENSOR ON CORRECT DEVICE
-#     codes_tensor = torch.tensor(sampled_codes, device=device).unsqueeze(0).unsqueeze(-1)  # (1, n_q, 1)
-#     next_latent = efficient_codes_to_latents(encodec_model, codes_tensor).squeeze(0).squeeze(-1).unsqueeze(0)  # (1, 128)
-#     next_latent = preprocess_latents_for_RNN(next_latent, clamp_val)
-    
-#     return next_latent, sampled_codes
-
-
 def run_inference(model, encodec_model, cond_seq, warmup_latents, clamp_val, top_n=3, temperature=1.0, include_warmup_audio=False) :
     """
     Generates audio sequence based on conditioning sequence using EnCodec latents.

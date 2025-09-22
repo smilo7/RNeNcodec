@@ -30,12 +30,6 @@ class RNN(nn.Module):
        self.n_q = config.n_q
        self.codebook_size = config.codebook_size
        self.num_layers = config.num_layers
-       print(f' debug 1')
-       # for Encodec codebook tables (one per RVQ level)
-       #self._E_eff = None   # (n_q, K, D) effective tables
-       self._E_list = None  # filled on first forward() when encodec_model is provided
-
-       print(f' debug 2')
 
 
        # input projection to RNN model size, split btween content and conditioning parameters
@@ -59,7 +53,6 @@ class RNN(nn.Module):
            for _ in range(self.n_q)
        ])
 
-       print(f' debug 4')
        self._initialize_weights()
 
 
@@ -69,8 +62,6 @@ class RNN(nn.Module):
        E_eff = self._build_effective_codebooks(encodec_model)   # (n_q, K, D) on dev
        # Non-persistent: won’t be saved in checkpoints
        self.register_buffer("_E_eff", E_eff, persistent=False)
-       self._E_list = [self._E_eff[i] for i in range(self.n_q)]
-
 
 
    def _initialize_weights(self):
@@ -80,75 +71,7 @@ class RNN(nn.Module):
            elif "bias" in name:
                nn.init.constant_(param, 0.0)
 
-#    def forward(self, input, hidden, target_codebook_latents=None, use_teacher_forcing=False, 
-#                temperature=1.0, batch_size=1):
-#        """
-#        Args:
-#            input: (batch_size, input_size + cond_size) - 128D latent + conditioning
-#            hidden: GRU hidden state
-#            target_codebook_latents: Optional[List[Tensor]] - 128D latents for each codebook for teacher forcing
-#            use_teacher_forcing: bool - whether to use teacher forcing or autoregressive prediction
-#            encodec_model: EnCodec model for decoding predicted tokens to latents (needed for autoregressive mode)
-#            temperature: float - sampling temperature for autoregressive mode
-#            batch_size: batch size
-           
-#        Returns:
-#            logits: List of tensors, each (batch_size, codebook_size)
-#            hidden: Updated GRU hidden state
-#        """
-       
-#        # Split the input and process through GRU (same as before)
-#        latent_part = input[:, :self.input_size]           # (batch, 128)
-#        cond_part = input[:, self.input_size:]             # (batch, cond_size)
 
-#        assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= {1.05}"
-       
-#        # Embed each separately to a different segment of the GRU input
-#        latent_h = self.latent_proj(latent_part)
-#        cond_h = self.cond_proj(cond_part)
-       
-#        # Combine
-#        h1 = torch.cat([latent_h, cond_h], dim=-1)
-       
-#        # GRU processing of the combined input
-#        h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
-#        h_out = h_out.view(batch_size, -1)
-       
-#        # Sequential codebook prediction
-#        logits = []
-#        cumulative_latent = torch.zeros(batch_size, self.input_size, device=h_out.device)  # Sum of lower codebook latents
-       
-#        for codebook_idx in range(self.n_q):
-#            # Prepare input for this codebook predictor
-#            decoder_input = torch.cat([h_out, cumulative_latent], dim=-1)
-           
-#            # Predict logits for this codebook
-#            codebook_logits = self.decoders[codebook_idx](decoder_input)
-#            logits.append(codebook_logits)
-           
-#            # Update cumulative latent for next codebook
-#            if codebook_idx < self.n_q - 1:  # Don't need to update after last codebook
-#                if use_teacher_forcing and target_codebook_latents is not None:
-#                    # Teacher forcing: use ground truth latent
-#                    cumulative_latent = cumulative_latent + target_codebook_latents[codebook_idx]
-#                else:
-                   
-#                    # Sample from the predicted distribution
-#                    probs = torch.softmax(codebook_logits / temperature, dim=-1)
-#                    sampled_tokens = torch.multinomial(probs, 1).squeeze(-1)  # (batch_size,)
-
-
-#                    decoded_latent = self._code_to_latent_level(
-#                             codebook_idx,
-#                             sampled_tokens,
-#                             out_device=h_out.device
-#                    )  # (batch_size, 128)
-
-
-
-#                    cumulative_latent = cumulative_latent + decoded_latent
-       
-#        return logits, hidden
    
 #---------------------           Unified sampling   ---------------------------------
 
@@ -292,6 +215,14 @@ class RNN(nn.Module):
         raise ValueError(f"Unknown sample_mode={mode!r}")
         
    def _build_effective_codebooks(self, encodec_model: nn.Module) -> torch.Tensor:
+        """
+        This is the lookup table for use in going from tokens to latent space. 
+        We create the table by actually decoding each token index since we couldn't find how they are stored in the Encodec model!
+
+        Conventions:
+            K - codebook size (eg. 1024)
+            D - latent dimension (e.g. 128)
+        """
         device = next(encodec_model.parameters()).device
         q = getattr(encodec_model, "quantizer", None)
         layers = getattr(q, "layers", None) or getattr(getattr(q, "vq", None), "layers", None)
@@ -318,6 +249,15 @@ class RNN(nn.Module):
         Decode ONE level using the cached effective table (matches Encodec exactly).
         tokens: (B,) or (B,1) LongTensor
         returns: (B, 128) float
+
+        Note, this is essentially a drop in replacement for Hugging Face enc_model.quantizer.decode() except for arg order:
+            input codes_btq is (B, T, n_q) → output (B, T, D).
+            HF: input codes is (n_q, B, T) → output (B, D, T).
+            So
+                z_bDt = enc_model.quantizer.decode(codes_ntb)  # (B, D, T)
+                is equal to: 
+                z_btD = model._codes_to_latent_sum(codes_btq, scales_btq=None)  # (B, T, D)
+                z_bDt = z_btD.permute(0, 2, 1)  # if you want Encodec decoder layout
         """
         E_q = self._E_eff[level_q]                                 # (K, D)
         idx = tokens.view(-1).to(E_q.device).long()                # (B,)
@@ -326,24 +266,44 @@ class RNN(nn.Module):
             lat = lat.to(out_device)
         return lat
 
-   def _codes_to_latent_sum(self, codes_btq: torch.Tensor, scales_btq: torch.Tensor | None = None, out_device=None):
+   def _codes_to_latent_sum(
+        self,
+        codes_btq: torch.Tensor,                 # (B, T, n_q) long/int
+        scales_btq: torch.Tensor | None = None,  # (B, T, n_q) float, optional
+        out_device=None):
         """
-        Manual sum across levels using cached effective tables.
-        codes_btq: (B, T, n_q) long
-        returns: (B, T, D) float
+        Sum per-level latents using cached codebook tables.
+        Returns: (B, T, D)
         """
         B, T, n_q = codes_btq.shape
         assert n_q == self.n_q, f"codes last dim {n_q} != n_q {self.n_q}"
-        z = 0.0
+    
+        dev = self._E_eff.device
+        D = self._E_eff.size(-1)
+    
+        # Ensure dtype/device ONCE
+        if codes_btq.dtype != torch.long or codes_btq.device != dev:
+            codes_btq = codes_btq.to(dev, dtype=torch.long, non_blocking=True)
+    
+        if scales_btq is not None and scales_btq.device != dev:
+            scales_btq = scales_btq.to(dev, non_blocking=True)
+    
+        # Preallocate accumulator
+        z = torch.zeros(B, T, D, device=dev, dtype=self._E_eff.dtype)
+    
+        # Loop levels; _E_eff[q] is a view (safe after .to())
         for q in range(n_q):
-            E_q = self._E_eff[q]                                    # (K, D)
-            idx = codes_btq[..., q].reshape(-1).to(E_q.device).long()
-            e_q = F.embedding(idx, E_q).view(B, T, -1)              # (B, T, D)
-            z = z + e_q
-        if out_device is not None and isinstance(z, torch.Tensor) and z.device != out_device:
-            z = z.to(out_device)
+            E_q = self._E_eff[q]  # (K, D)
+            idx = codes_btq[..., q].reshape(-1)  # (B*T,)
+            e_q = F.embedding(idx, E_q).view(B, T, D)  # (B, T, D)
+            if scales_btq is not None:
+                e_q = e_q * scales_btq[..., q].unsqueeze(-1)  # broadcast
+            z.add_(e_q)  # in-place accumulate
+    
+        if out_device is not None and out_device != dev:
+            z = z.to(out_device, non_blocking=True)
         return z
-   
+       
    def _soft_and_hard_from_logits(self, logits_btnk: torch.Tensor, tau: float = 0.5, use_gumbel: bool = False):
         """
         Prepare for soft/ST training (not used yet).
