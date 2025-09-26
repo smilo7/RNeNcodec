@@ -531,6 +531,7 @@ class EnCodecLatentDataset(Dataset):
                 norm_val = (raw_val - vmin) / (vmax - vmin)
                 # Clamp to [0,1] for safety
                 norm_val = max(0.0, min(1.0, norm_val))
+                print(f'({key} Mapping raw val = {raw_val} to norm val = {norm_val}')
                 result.append(norm_val)
                     
             return torch.tensor(result, dtype=torch.float32)

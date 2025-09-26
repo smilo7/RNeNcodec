@@ -83,9 +83,9 @@ class RNN(nn.Module):
             temperature=1.0,
             batch_size=1,
             *,
-            sample_mode: str = "sample",      # NEW: "argmax" | "gumbel" | "sample"
-            top_n: int | None = None,         # NEW: optional top-k restriction
-            return_step_latent: bool = True   # NEW: return sum of per-level latents this step
+            sample_mode: str = "sample",      # "argmax" | "gumbel" | "sample"
+            top_n: int | None = None,         # optional top-k restriction
+            return_step_latent: bool = True   # return sum of per-level latents this step
             ):
         """
         Args:
@@ -182,38 +182,97 @@ class RNN(nn.Module):
 #  Helpers
 ####################################################################
 
-   def _select_tokens(self, logits_k: torch.Tensor, *, mode: str = "gumbel",
-                   temperature: float = 1.0, top_n: int | None = None) -> torch.LongTensor:
-        """
-        Select hard token indices from logits (..., K) once.
-        mode: "argmax" | "gumbel" | "sample"
-        top_n: if set, restrict choice to top_n logits (top-k sampling).
-        returns: indices with shape logits_k.shape[:-1]
-        """
+   # def _select_tokens(self, logits_k: torch.Tensor, *, mode: str = "gumbel",
+   #                 temperature: float = 1.0, top_n: int | None = None) -> torch.LongTensor:
+   #      """
+   #      Select hard token indices from logits (..., K) once.
+   #      mode: "argmax" | "gumbel" | "sample"
+   #      top_n: if set, restrict choice to top_n logits (top-k sampling).
+   #      returns: indices with shape logits_k.shape[:-1]
+   #      """
+   #      K = logits_k.size(-1)
+   #      if mode == "argmax":
+   #          return logits_k.argmax(dim=-1)
+
+   #      # optional top-k mask
+   #      if top_n is not None and 1 <= top_n < K:
+   #          topv, topi = torch.topk(logits_k, k=top_n, dim=-1)
+   #          masked = torch.full_like(logits_k, float("-inf"))
+   #          logits_k = masked.scatter(-1, topi, topv)
+
+   #      if mode == "gumbel":
+   #          # Gumbel(0,1) noise
+   #          u = torch.rand_like(logits_k).clamp_(1e-6, 1 - 1e-6)
+   #          g = -torch.log(-torch.log(u))
+   #          return ((logits_k + g) / max(temperature, 1e-6)).argmax(dim=-1)
+
+   #      if mode == "sample":
+   #          probs = F.softmax(logits_k / max(temperature, 1e-6), dim=-1)
+   #          flat = probs.reshape(-1, probs.size(-1))
+   #          idx = torch.multinomial(flat, num_samples=1).squeeze(-1)
+   #          return idx.view(probs.shape[:-1])
+
+   #      raise ValueError(f"Unknown sample_mode={mode!r}")
+
+   def _select_tokens(
+        self,
+        logits_k: torch.Tensor, *,            # (..., K)
+        mode: str = "gumbel",                 # "argmax" | "gumbel" | "sample"
+        temperature: float = 1.0,
+        top_n: int | None = None,
+    ) -> torch.LongTensor:
         K = logits_k.size(-1)
-        if mode == "argmax":
+    
+        # Fast path
+        if mode == "argmax" or temperature <= 0:
             return logits_k.argmax(dim=-1)
-
-        # optional top-k mask
-        if top_n is not None and 1 <= top_n < K:
-            topv, topi = torch.topk(logits_k, k=top_n, dim=-1)
-            masked = torch.full_like(logits_k, float("-inf"))
-            logits_k = masked.scatter(-1, topi, topv)
-
+    
+        # Sanitize top_n
+        if top_n is not None:
+            top_n = int(top_n)
+            if top_n < 1:
+                raise ValueError("top_n must be >= 1")
+            if top_n >= K:
+                top_n = None  # full set
+    
+        t = 1e-6 if temperature <= 0 else temperature
+    
+        if top_n is None:
+            if mode == "gumbel":
+                g = torch.empty_like(logits_k).exponential_().log_().neg_()  # ~Gumbel(0,1)
+                return (logits_k / t + g).argmax(dim=-1)
+            elif mode == "sample":
+                probs = torch.softmax(logits_k / t, dim=-1)
+                flat  = probs.view(-1, K)
+                idx   = torch.multinomial(flat, 1).squeeze(-1)
+                return idx.view(probs.shape[:-1])
+            else:
+                raise ValueError(f"unknown mode: {mode!r}")
+    
+        # Restrict to top-k slice
+        vals, inds = logits_k.topk(top_n, dim=-1)  # inds: (..., top_n)
+    
         if mode == "gumbel":
-            # Gumbel(0,1) noise
-            u = torch.rand_like(logits_k).clamp_(1e-6, 1 - 1e-6)
-            g = -torch.log(-torch.log(u))
-            return ((logits_k + g) / max(temperature, 1e-6)).argmax(dim=-1)
+            g   = torch.empty_like(vals).exponential_().log_().neg_()
+            sel = (vals / t + g).argmax(dim=-1)                # (...,)
+        elif mode == "sample":
+            probs = torch.softmax(vals / t, dim=-1)
+            flat  = probs.view(-1, top_n)
+            sel   = torch.multinomial(flat, 1).view(*probs.shape[:-1]).squeeze(-1)  # (...,)
+        else:
+            raise ValueError(f"unknown mode: {mode!r}")
+    
+        # Map back to original indices — handle 1D and batched cases
+        if inds.dim() == 1:
+            # Unbatched: inds (top_n,), sel scalar
+            return inds[sel]
+        else:
+            # Batched: make sel shape (..., 1) to match inds (..., top_n)
+            sel_exp = sel.view(*inds.shape[:-1], 1).long()
+            return inds.gather(-1, sel_exp).squeeze(-1)
 
-        if mode == "sample":
-            probs = F.softmax(logits_k / max(temperature, 1e-6), dim=-1)
-            flat = probs.reshape(-1, probs.size(-1))
-            idx = torch.multinomial(flat, num_samples=1).squeeze(-1)
-            return idx.view(probs.shape[:-1])
 
-        raise ValueError(f"Unknown sample_mode={mode!r}")
-        
+    
    def _build_effective_codebooks(self, encodec_model: nn.Module) -> torch.Tensor:
         """
         This is the lookup table for use in going from tokens to latent space. 
