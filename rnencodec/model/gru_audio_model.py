@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Literal
+
+TrainSampleMode = Literal["argmax","gumbel","sample"]
 
 @dataclass
 class GRUModelConfig:
@@ -15,7 +17,11 @@ class GRUModelConfig:
    dropout: float = 0.1
    inp_proportion = 1
    cond_proportion = 1
-
+   # training-time sampling (affects gradients/dynamics)
+   train_sample_mode: TrainSampleMode = "sample"
+   gumbel_tau_start: float = 1.0
+   gumbel_tau_end: float = 0.5
+   straight_through: bool = True
 
 class RNN(nn.Module):
    def __init__(self, config: GRUModelConfig, encodec_model):
@@ -83,8 +89,11 @@ class RNN(nn.Module):
             temperature=1.0,
             batch_size=1,
             *,
-            sample_mode: str = "sample",      # "argmax" | "gumbel" | "sample"
-            top_n: int | None = None,         # optional top-k restriction
+            sample_mode: str | None = None, # "argmax" | "gumbel" | "sample"
+            top_n: int | None = None, # optional top-k restriction
+            gumbel_tau: float | None = None,
+
+               
             return_step_latent: bool = True   # return sum of per-level latents this step
             ):
         """
@@ -105,6 +114,12 @@ class RNN(nn.Module):
             sampled_indices: (batch_size, n_q) LongTensor of the ONE set of tokens used (None if pure TF)
             step_latent: (batch_size, 128) sum of per-level latents for this step (or None if disabled)
         """
+
+        sample_mode = sample_mode or self.config.sample_mode
+        top_n = top_n or self.config.top_n
+        gumbel_tau = gumbel_tau or self.config.gumbel_tau_start
+
+       
         # Split the input and process through GRU
         latent_part = input[:, :self.input_size]           # (batch, 128)
         cond_part   = input[:, self.input_size:]           # (batch, cond_size)
@@ -181,38 +196,6 @@ class RNN(nn.Module):
 ####################################################################
 #  Helpers
 ####################################################################
-
-   # def _select_tokens(self, logits_k: torch.Tensor, *, mode: str = "gumbel",
-   #                 temperature: float = 1.0, top_n: int | None = None) -> torch.LongTensor:
-   #      """
-   #      Select hard token indices from logits (..., K) once.
-   #      mode: "argmax" | "gumbel" | "sample"
-   #      top_n: if set, restrict choice to top_n logits (top-k sampling).
-   #      returns: indices with shape logits_k.shape[:-1]
-   #      """
-   #      K = logits_k.size(-1)
-   #      if mode == "argmax":
-   #          return logits_k.argmax(dim=-1)
-
-   #      # optional top-k mask
-   #      if top_n is not None and 1 <= top_n < K:
-   #          topv, topi = torch.topk(logits_k, k=top_n, dim=-1)
-   #          masked = torch.full_like(logits_k, float("-inf"))
-   #          logits_k = masked.scatter(-1, topi, topv)
-
-   #      if mode == "gumbel":
-   #          # Gumbel(0,1) noise
-   #          u = torch.rand_like(logits_k).clamp_(1e-6, 1 - 1e-6)
-   #          g = -torch.log(-torch.log(u))
-   #          return ((logits_k + g) / max(temperature, 1e-6)).argmax(dim=-1)
-
-   #      if mode == "sample":
-   #          probs = F.softmax(logits_k / max(temperature, 1e-6), dim=-1)
-   #          flat = probs.reshape(-1, probs.size(-1))
-   #          idx = torch.multinomial(flat, num_samples=1).squeeze(-1)
-   #          return idx.view(probs.shape[:-1])
-
-   #      raise ValueError(f"Unknown sample_mode={mode!r}")
 
    def _select_tokens(
         self,

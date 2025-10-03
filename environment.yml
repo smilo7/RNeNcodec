@@ -1,19 +1,41 @@
-name: basicaudio
+name: rnencodec
 channels:
   - pytorch
-  - nvidia          # enables optional GPU add-on below
+  - nvidia          # only needed if you use the CUDA line below
   - conda-forge
-  - defaults
 dependencies:
+  # Core
   - python>=3.12
+  - pip
   - numpy
+  - scipy
   - matplotlib
+
+  # Jupyter + widgets + TB
   - jupyterlab
   - ipykernel
+  - ipywidgets
   - tensorboard
+
+  # Audio libs (Conda versions play nice on Linux)
+  - libsndfile       # for soundfile
+  - portaudio        # backend for sounddevice on Linux
+
+  # PyTorch stack (CPU-only by default)
   - pytorch
   - torchvision
   - torchaudio
-  - pip
+
+  # ---- If you want GPU/CUDA (Linux + NVIDIA) uncomment the next line ----
+  # - pytorch-cuda=12.1
+
+  # PIP extras (editable installs + packages not on conda)
   - pip:
-    - soundfile
+      # Your repo (this one), installed in editable mode
+      - -e .
+
+      # Your synth repo (sibling folder), with UI extra
+      - -e ./synth[ui]
+
+      # If you prefer the PyPI wheel for soundfile instead of conda’s:
+      # - soundfile
