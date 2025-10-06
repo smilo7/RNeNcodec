@@ -1,84 +1,186 @@
-# RNNControl
+# RNeNcodec — QuickStart
 
-Jupyter notebooks that run experiments investigating the effect of conditional parameters on audio synthesis.  
+RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio generation. This repo gives you a 5-minute path to (1) run inference with a pretrained checkpoint and (2) try a tiny training loop on a small example dataset.
 
-Input to the RNN is a sequence of vectors where one component represents the audio signal and the others represent conditional parameters. The audio signal is mulaw encoded (to [0,255]) and then mapped to [0,1]. 
+- Demo & audio examples: _(link)_
+- Paper (arXiv): _(link)_
 
-During Training, the output is a vector of logits, one for each possible mu-coded value ( in [0,255]). That is, it is a considered a category and compared to the one-hot representation of the target. 
+---
 
-During inference, the logits are converted to a probability distribution with softmax, a sample is chosen, and then it's index (a mu-law value) is converted to a single floating point value as the audio input for the next sequence step. 
+## 0) Requirements
 
-The default model is very small (4 layers of 48 units), with about 70K trainable parameters, and trains (recognizably) on the nsynth64.76_sm dataset (provided) of 260 2.5 sec. sounds in about 12 minutes (40 epochs of 100 batches of 256 sequences) on an nvidia 5090 (about 3 times longer on the desktop CPUs). Slow on inference, generating 2 secs of sound in 9 seconds on the GPU, or 6 secs on the CPUs (yep!).
+- Python ≥ 3.9
+- Conda/Mamba (recommended)
+- Linux or macOS (Windows may work; real-time audio is easier on Linux/macOS)
+- For real-time audio: PortAudio runtime (Linux: `sudo apt-get install -y libportaudio2`)
 
-## Quick Start 
+---
 
-### Prerequisites
-- **Conda** (Miniconda or Anaconda)
-- (Optional) **NVIDIA GPU** with a recent driver if you want CUDA acceleration
-
-```bash
-# 1) Create the environment (CPU by default)
-conda env create -f environment.yml
-
-# 2) Activate it
-conda activate basicaudio
-
-# 3) (Optional) Register a Jupyter kernel with this env
-python -m ipykernel install --user --name basicaudio
-```
-### (Optional) NVIDIA GPU Acceleration
-
-By default, the env is **CPU-only** (portable).  
-On machines with a compatible NVIDIA driver, install CUDA support with one command:
+## 1) Create environment
 
 ```bash
-# With the env active
-conda install -n basicaudio -c nvidia pytorch-cuda=xx.x
+# from the repo root
+mamba env create -f environment.yml   # or: conda env create -f environment.yml
+mamba activate rnencodec              # or: conda activate rnencodec
 ```
 
-Install the small test dataset [nsynth.64.76_sm](https://drive.google.com/file/d/1zzXccguczXJIDh8vxoXvt1xGmKlGn_f6/view?usp=sharing) into the /data folder.  (Check to make sure the wav files are are ./data/nsynth.64.76_sm and not in a nested directory).
+If you don’t use conda, ensure Python ≥3.9 and `pip` are available in your venv.
 
-Open  jupyter lab,   
+---
 
-1. Train the model:
-   - Open `Train.ipynb` and run the cells to train the model.
+## 2) Install packages (editable)
 
-2. Generate audio samples:  
-   - Open `Inference.ipynb` 
-   - update the configuration structure to point to the path where the trained model was written,
-   - run the cells to generate audio samples using the trained model.
+This installs **rnencodec** and the separate **rtpysynth** real-time engine (UI optional).
 
+```bash
+# repo root
+pip install -e .
+pip install -e ./synth[ui]
+```
 
-## Folder structure
-**Modules**  
-+--model  
-   |- gru_audio_model
-+--utils 
-    |- utils.py
-+--audioDataLoader 
-    |- audio_dataset.py
-    |- mulaw.py  
-inference.py
+> Import names:
+> - `rnencodec` → your package (e.g., `from rnencodec import RNNGenerator`)
+> - `rtpysynth` exposes `realtime_synth` and `realtime_synth_ui` (e.g., `from realtime_synth.engine import RTStream`)
 
+---
 
-**Files**  
-* Train.ipynb: for training and saving model (an RNN)
-* Inference.ipynb: for loading model and generating audio samples
+## 3) Get the QuickStart artifacts (weights + dataset)
 
-**Data**  
-* data: directory containing audio files for training
-This model was developed using a modified subset of the [NSynth dataset](https://magenta.tensorflow.org/datasets/nsynth). That subset can be found here: [nsynth.64.76_sm](https://drive.google.com/file/d/1zzXccguczXJIDh8vxoXvt1xGmKlGn_f6/view?usp=sharing). There are two instruments (a clarinet and a trumpet) sampled over an octave of notes (midi pitch 64-76) and 10 synthetically imposed amplituide values. Each file is the middle 2.5 seconds of the original sample (no attack and decay segments). The parameter values are in the file names and extracted by the data loader in order to provide them to the model for training. You must specify the parameter names and the range of values you want to map them to in the configuration files provided to the Dataset and the Model (see Train.ipynp and Inference.ipynb). 
+This downloads the **pretrained checkpoint** and the **example HF-format dataset**, verifies SHA256, and (for the dataset) **auto-extracts** to `artifacts/data/waterfill_quickstart_hf_dataset/`.
 
-### Preparing your own data
-- Wav files should all be in a single folder
-- each should correspond to a single conditional parameter configuration
-- the parameter used for training (and later controling) the network should be contained in the file names (because that's where the Data Loader looks for them) in the form _PNAMExx.xx where xx.xx is a floating point parameter value for the parameter PNAME.
-- - e.g. For a file named nsynth_instID02.00_p76.00_a00.30.wav , the data loader will find three parameters, instID, p, and a. 
-- - These parameters are listed in the DataSet configuration files along with the mappings from the values found in the file names (arbitrary) to the values used to train the net (typically [0,1]). In our example dataset, the midi Pitch values are in the file names, and [64, 76] maps to [0,1] for training (and inference). 
+```bash
+python scripts/download_artifacts.py --all
+```
 
+You can fetch them separately:
 
-**Authors**  
-* Lonce Wyse <lonce.wyse@upf.edu>
+```bash
+python scripts/download_artifacts.py --weights
+python scripts/download_artifacts.py --dataset
+```
 
+Paths used by the QuickStart notebooks/configs:
 
+- Weights: `artifacts/weights/waterfill_quickstart.pt`
+- Dataset (after extract): `artifacts/data/waterfill_quickstart_hf_dataset/`
 
+---
+
+## 4) Run the QuickStart notebooks
+
+```bash
+jupyter lab quickstart/
+# open: 1_Inference.ipynb  (zero-to-audio in a few cells)
+# open: 1_Train.ipynb      (tiny training loop on example dataset)
+```
+
+> Tip: the first cell in each notebook usually contains:
+> ```python
+> %load_ext autoreload
+> %autoreload 2
+> ```
+> so edits to your package take effect without restarting the kernel.
+
+---
+
+## 5) Minimal code examples
+
+### Inference (Python)
+
+```python
+from pathlib import Path
+from rnencodec.generator.generator import RNNGenerator
+
+ckpt = Path("artifacts/weights/waterfill_quickstart.pt")
+gen = RNNGenerator.from_checkpoint(ckpt, device="cpu")   # or "cuda"
+gen.prime(warmup_frames=200)
+
+audio = gen.generate(seconds=5.0, sample_rate=24000)     # np.ndarray
+```
+
+### Real-time stream (optional)
+
+```python
+from realtime_synth.engine import RTStream
+
+stream = RTStream(sample_rate=24000, callback=lambda n: gen.next_samples(n))
+stream.start()
+# ... interact ...
+stream.stop()
+```
+
+### Tiny training sketch
+
+```python
+import yaml
+from rnencodec.model.gru_audio_model import RNN, GRUModelConfig
+# from rnencodec.audioDataLoader.audio_dataset import AudioHFLoader  # your loader
+
+cfg = yaml.safe_load(open("rnencodec/configs/quickstart_train.yaml"))
+model = RNN(GRUModelConfig(**cfg["model"]))
+
+# ds = AudioHFLoader(root=cfg["dataset_root"], split="train")
+# ... your minimal training loop here ...
+```
+
+---
+
+## 6) Where things live
+
+```
+repo_root/
+├─ rnencodec/                    # installable package
+│  ├─ generator/                 # RNNGenerator, streaming helpers
+│  ├─ model/                     # GRU model & config
+│  ├─ audioDataLoader/           # dataloader(s)
+│  ├─ utils/                     # downloads, IO, misc
+│  └─ configs/                   # quickstart_{infer,train}.yaml
+├─ quickstart/                   # two notebooks users should run first
+│  ├─ 1_Inference.ipynb
+│  └─ 1_Train.ipynb
+├─ scripts/
+│  └─ download_artifacts.py      # pulls weights + dataset (verifies SHA256)
+├─ artifacts/                    # created on first download
+│  ├─ weights/waterfill_quickstart.pt
+│  └─ data/waterfill_quickstart_hf_dataset/...
+└─ synth/                        # separate package (rtpysynth)
+```
+
+---
+
+## 7) Troubleshooting
+
+- **PortAudio missing (real-time audio):**
+  - Ubuntu: `sudo apt-get install -y libportaudio2`
+- **Jupyter widgets don’t display (UI extra):**
+  - Ensure `ipywidgets` is installed (it is when you used `./synth[ui]`).
+- **CUDA not found:** set `device: "cpu"` in `rnencodec/configs/quickstart_infer.yaml`.
+- **Import errors in notebooks:** make sure you ran `pip install -e .` and selected the right kernel (the env you created).
+
+---
+
+## 8) Reproducibility & versions
+
+Artifacts are served under a versioned path (e.g., `.../RNeNcodec/v0.1/...`) and verified via SHA256 in `scripts/download_artifacts.py`. To pin a new model/dataset release:
+
+1. Upload files under a new version folder on the server (e.g., `v0.2/`).
+2. Update the URLs + SHA256 constants in `scripts/download_artifacts.py`.
+3. Bump any references in `rnencodec/configs/*`.
+
+---
+
+## 9) License & citation
+
+- Code license: MIT _(or your choice)_
+- If you use RNeNcodec in academic work, please cite: _(arXiv entry)_
+
+```bibtex
+@misc{rnencodec2025,
+  title   = {RNeNcodec: Lightweight RNN over Encodec Tokens for Interactive Audio},
+  author  = {Wyse, Lonce and ...},
+  year    = {2025},
+  eprint  = {...},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.SD}
+}
+```

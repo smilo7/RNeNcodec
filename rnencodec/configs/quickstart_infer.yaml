@@ -1,0 +1,7 @@
+# rnencodec/configs/quickstart_infer.yaml
+sample_rate: 24000
+frame_rate: 75
+device: "cpu"              # or "cuda"
+checkpoint: "artifacts/weights/waterfill_quickstart.ckpt"
+chunk_seconds: 0.5
+warmup_frames: 200
