@@ -1,41 +1,46 @@
 name: rnencodec
 channels:
-  - pytorch
-  - nvidia          # only needed if you use the CUDA line below
   - conda-forge
+channel_priority: strict
 dependencies:
   # Core
-  - python>=3.12
+  - python=3.11
   - pip
-  - numpy
+  - numpy>=1.26
   - scipy
   - matplotlib
+  - seaborn
 
-  # Jupyter + widgets + TB
+  # Jupyter
   - jupyterlab
   - ipykernel
   - ipywidgets
   - tensorboard
 
-  # Audio libs (Conda versions play nice on Linux)
-  - libsndfile       # for soundfile
-  - portaudio        # backend for sounddevice on Linux
+  # Audio libs (no conda portaudio/sounddevice here)
+  - libsndfile
+  - pysoundfile
+  - ffmpeg
+  - soxr
+  - librosa
+  - audioread
 
-  # PyTorch stack (CPU-only by default)
-  - pytorch
-  - torchvision
-  - torchaudio
+  # Hugging Face
+  - transformers
+  - accelerate
+  - datasets
+  - tokenizers
+  - sentencepiece
+  - safetensors
+  - huggingface_hub
 
-  # ---- If you want GPU/CUDA (Linux + NVIDIA) uncomment the next line ----
-  # - pytorch-cuda=12.1
+  # PyTorch trio (CPU builds from conda-forge)
+  - pytorch=2.5.*
+  - torchaudio=2.5.*
+  - torchvision=0.20.*
 
-  # PIP extras (editable installs + packages not on conda)
+  # Your packages via pip
   - pip:
-      # Your repo (this one), installed in editable mode
       - -e .
-
-      # Your synth repo (sibling folder), with UI extra
-      - -e ./synth[ui]
-
-      # If you prefer the PyPI wheel for soundfile instead of conda’s:
-      # - soundfile
+#      - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
+#      - sounddevice==0.5.2   # pip wheel bundles PortAudio; 24 kHz-friendly

@@ -1,2 +1,3 @@
 from .generator import RNNGenerator
-__all__ = ["RNNGenerator"]
+from .rnencodec_rtplayer import EncodecRTPlayer
+__all__ = ["RNNGenerator", "EncodecRTPlayer"]

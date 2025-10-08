@@ -34,13 +34,20 @@ class RNNGenerator():
 
         # Build model, load weights
         model = RNN(model_config, enc_model).to(device)
-        ckpt = torch.load(checkpoint_path, map_location=map_location or device)
-        state = ckpt.get("model_state_dict", ckpt.get("state_dict"))
-        if state is None:
-            raise KeyError("Checkpoint missing 'model_state_dict' (or 'state_dict').")
-        missing, unexpected = model.load_state_dict(state, strict=strict)
-        if not strict and (missing or unexpected):
-            print(f"[from_checkpoint] missing={missing}, unexpected={unexpected}")
+
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        state = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state, strict=False)  # False if your export is fp16; True if fp32
+        model.to(device).eval()
+
+
+        # ckpt = torch.load(checkpoint_path, map_location=map_location or device)
+        # state = ckpt.get("model_state_dict", ckpt.get("state_dict"))
+        # if state is None:
+        #     raise KeyError("Checkpoint missing 'model_state_dict' (or 'state_dict').")
+        # missing, unexpected = model.load_state_dict(state, strict=strict)
+        # if not strict and (missing or unexpected):
+        #     print(f"[from_checkpoint] missing={missing}, unexpected={unexpected}")
 
         return cls(model=model, model_config=model_config, data_config=data_config, enc_model=enc_model, chunksize=chunksize, hopsize=hopsize, sample_mode=sample_mode, top_n=top_n, temperature=temperature)
     

@@ -11,7 +11,7 @@ ARTIFACT_VERSION = "v0.1"
 SERVER_BASE = f"https://animatedsound.com/RNeNcodec/{ARTIFACT_VERSION}"
 
 WEIGHTS_URL  = f"{SERVER_BASE}/weights/waterfill_quickstart.pt"
-DATASET_URL  = f"{SERVER_BASE}/data/waterfill_quickstart_dataset.tar.gz"
+DATASET_URL  = f"{SERVER_BASE}/data/waterfill_quickstart_hf_dataset.tar.gz"
 
 # --- Put the REAL SHA256 you compute for each file here ---
 WEIGHTS_SHA256 = "2880edd259b5f7b926ad5c5c825025cfddd206f2107d18c2d1c6de592ac9f04a"
@@ -31,7 +31,7 @@ def main():
     if args.weights:
         fetch(
             url=WEIGHTS_URL,
-            dest=(root / "weights" / "rnencodec_quickstart.ckpt"),
+            dest=(root / "weights" / "waterfill_quickstart.pt"),
             sha256=WEIGHTS_SHA256,
             extract=False,
             force=args.force,
@@ -40,7 +40,7 @@ def main():
     if args.dataset:
         fetch(
             url=DATASET_URL,
-            dest=(root / "data" / "example_hf_dataset.tar.gz"),
+            dest=(root / "data" / "waterfill_quickstart_hf_dataset.tar.gz"),
             sha256=DATASET_SHA256,
             extract=True,   # will unpack into artifacts/data/
             force=args.force,
