@@ -42,5 +42,5 @@ dependencies:
   # Your packages via pip
   - pip:
       - -e .
-#      - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
-#      - sounddevice==0.5.2   # pip wheel bundles PortAudio; 24 kHz-friendly
+      - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
+      - sounddevice==0.5.2   # pip wheel bundles PortAudio; 24 kHz-friendly
