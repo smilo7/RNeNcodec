@@ -8,8 +8,7 @@ scratch/
 /runs
 old/
 artifacts/
-
-/synth       #submodule - doesn't need to be here, just installed in conda
+synth/
 
 # Python build artifacts
 __pycache__/
@@ -38,3 +37,4 @@ Thumbs.db
 
 # Logs
 *.log
+synth/
