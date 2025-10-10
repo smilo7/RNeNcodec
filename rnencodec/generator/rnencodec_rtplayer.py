@@ -6,6 +6,8 @@
 from typing import Optional, Sequence
 import numpy as np
 
+import soxr 
+
 # for the rt synth
 from realtime_synth.generators.base import BaseGenerator
 from realtime_synth.utils import exp_map01
@@ -18,8 +20,36 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 #####################################################################
 #####################################################################
+class Up2x48kStream:
+    """Feed N at 24 kHz → get exactly 2N at 48 kHz every call (pads during startup)."""
+    def __init__(self, channels=1, dtype="float32", quality="HQ"):
+        self.ch = int(channels)
+        self.dtype = dtype
+        self.rs = soxr.ResampleStream(24000, 48000, num_channels=self.ch, dtype=dtype, quality=quality)
+        self.buf = np.zeros((0, self.ch), dtype=dtype) if self.ch > 1 else np.zeros(0, dtype=dtype)
 
-
+    def process(self, y24):
+        x = np.asarray(y24, dtype=self.dtype, order="C")
+        if self.ch > 1 and x.ndim == 1:
+            x = np.tile(x[:, None], (1, self.ch))
+        y48_new = self.rs.resample_chunk(x)                         # stateful
+        # append to queue
+        self.buf = (np.concatenate([self.buf, y48_new], axis=0) if self.ch > 1
+                    else np.concatenate([self.buf, y48_new], axis=0))
+        want = (x.shape[0] * 2)
+        # pad during initial latency so we always return exactly 2N
+        if self.buf.shape[0] < want:
+            deficit = want - self.buf.shape[0]
+            pad = (np.zeros((deficit, self.ch), dtype=self.dtype) if self.ch > 1
+                   else np.zeros(deficit, dtype=self.dtype))
+            out = (np.concatenate([self.buf, pad], axis=0))
+            self.buf = self.buf[0:0]
+            return out
+        out = self.buf[:want]
+        self.buf = self.buf[want:]
+        return out
+        
+    
 class EncodecRTPlayer(BaseGenerator):
     # normalized params in [0,1]
    
@@ -44,6 +74,10 @@ class EncodecRTPlayer(BaseGenerator):
 
         self.buffersize = buffersize
         self.nextsample = 0
+
+        self.internal_sr=sr
+        self.counter=0
+        self.up2x= Up2x48kStream() # StatefulUp2x(channels=1, taps=64)
         # NOTE: assumes global sr and frame_rate are defined elsewhere in your code
         self.framesizesamples = sr // frame_rate  # e.g., 75; encoder is 75 fps
 
@@ -51,7 +85,7 @@ class EncodecRTPlayer(BaseGenerator):
         self.seeding_len = self.chunksizeframes - self.framehopsize
         self.genaudioframe = 0      # mth frame we've generated in total
 
-        self._last_error = None
+        self._last_error = ""
         self._decodetime = 0.0
         self._callrecord = ""
 
@@ -126,54 +160,70 @@ class EncodecRTPlayer(BaseGenerator):
         return nextseq[-self.framehopsize * self.framesizesamples:]
 
 
-    # -----------------------
-    def generate(self, frames, sr):
-        assert frames == self.buffersize, "ooh, you're in trouble if frames requested is different than the buffer size."
-
-        # if self.amp <= 0.0 or self.freq <= 0.0:
-        #     self._scratch.fill(0.0)
-        #     return self._scratch
-
-        # slice current hop
-        endsamp = self.nextsample + self.buffersize
-        y = self.thisaudioseq[self.nextsample:endsamp]
-        self.nextsample = endsamp
-
-        # NON-BLOCKING: if we just started a hop, see if the background result is ready
-        if self.currentchunkframe == 0:
-            self._try_collect_next()
-            # if nothing in-flight, (re)start background worker
-            if self._next_future is None:
-                self._schedule_next_hop()
-
-        # advance within hop; at hop boundary, try to swap
-        self.currentchunkframe += 1
-        if self.currentchunkframe == self.framehopsize:
-            if self.nextaudioseq is not None:
-                # swap in new hop (no copy; ensure float32)
-                self.thisaudioseq = np.asarray(self.nextaudioseq, dtype=np.float32)
-                self.nextaudioseq = None
-                self._schedule_next_hop()  # immediately start computing the following hop
-            else:
-                # no hop ready → output SILENCE for one hop (your preference)
-                msg = "missed hop swap"
-                self._last_error = (self._last_error + " | " + msg) if self._last_error else msg
-                self.thisaudioseq = np.zeros(self.framehopsize * self.framesizesamples, dtype=np.float32)
-                # also (re)schedule next hop in case worker died
+    def generate(self, nsamples, sr):
+        try:
+            self.coiunter = self.counter+1
+            # Are we returning at 24k (native) or 48k (upsampled)?
+            do_resample = (sr != self.internal_sr)
+    
+            # How many 24k samples do we need to slice for this call?
+            need24 = (nsamples + 1) // 2 if do_resample else nsamples
+    
+            # Slice current hop at 24k
+            endsamp = self.nextsample + need24
+            y = self.thisaudioseq[self.nextsample:endsamp]
+            self.nextsample = endsamp
+    
+            # NON-BLOCKING: if we just started a hop, see if the background result is ready
+            if self.currentchunkframe == 0:
+                self._try_collect_next()
                 if self._next_future is None:
                     self._schedule_next_hop()
-            # reset for new hop window
-            self.currentchunkframe = 0
-            self.nextsample = 0
+    
+            # advance within hop; at hop boundary, try to swap in the new hop buffer
+            self.currentchunkframe += 1
+            if self.currentchunkframe == self.framehopsize:
+                if self.nextaudioseq is not None:
+                    self.thisaudioseq = np.asarray(self.nextaudioseq, dtype=np.float32, order="C")
+                    self.nextaudioseq = None
+                    self._schedule_next_hop()
+                else:
+                    # missed hop: output silence for the next window and reschedule
+                    self._last_error = (" | ".join(filter(None, [self._last_error, "missed hop swap"])))
+                    self.thisaudioseq = np.zeros(self.framehopsize * self.framesizesamples, dtype=np.float32)
+                    if self._next_future is None:
+                        self._schedule_next_hop()
+                self.currentchunkframe = 0
+                self.nextsample = 0
+    
+            if not do_resample:
+                # Return exactly nsamples @ 24k (pad if we ran short for any reason)
+                if y.shape[0] < nsamples:
+                    y = np.pad(y, (0, nsamples - y.shape[0]))
+                else:
+                    y = y[:nsamples]
+                return y.astype(np.float32, copy=False)
+    
+            # --- 24k -> 48k (stateful, exact length) ---
+            y24_c = np.asarray(y, dtype=np.float32, order="C")
+            y48 = self.up2x.process(y24_c)   # <-- use the instance you created in __init__
+    
+            # Guarantee exact nsamples at output rate
+            if y48.shape[0] < nsamples:
+                #self._last_error = self._last_error + " | " f"zero pad because {y48.shape[0]} is less than {nsamples}"
+                y48 = np.pad(y48, (0, nsamples - y48.shape[0]))
+            else:
+                y48 = y48[:nsamples]
+            #self._last_error = y48 # self._last_error + " | " f"call up2x.process count={self.counter} y24_c[0]={y24_c[0]}"
+            return y48.astype(np.float32, copy=False)
+    
+        except Exception as e:
+            # stash a readable error the UI can surface
+            self._last_error = self._last_error + " | " f"generate() error: {e!r}"
+            # fail-safe: return silence so the audio callback doesn't explode
+            return np.zeros(nsamples, dtype=np.float32)
 
-        # # Do post signal processing based on params if you need to 
-        # # scale into scratch (avoids alloc every block)
-        # np.multiply(y, self.amp, out=self._scratch, casting='unsafe')
-        # return self._scratch
-
-        #otherwise, just return the buffer
-        return y
-
+    
     # -----------------------
     # This first sets the norm_params, and the units_params which are just used for display (the norm_params are the ones sent to the synth)
     def set_params(self, norm_params):

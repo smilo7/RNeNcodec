@@ -41,6 +41,7 @@ dependencies:
 
   # Your packages via pip
   - pip:
+      - soxr>=0.4.0   # pysoxr with ResampleStream
       - -e .
       - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
       - sounddevice==0.5.2   # pip wheel bundles PortAudio; 24 kHz-friendly
