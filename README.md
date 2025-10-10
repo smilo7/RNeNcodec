@@ -22,6 +22,8 @@ RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio gene
 ```bash
 # from the repo root
 micromamba create -f environment.yml --no-rc -y  
+micromamba run -n rnencodec python -m ipykernel install --user \
+  --name rnencodec --display-name "Python (rnencodec)"
 micromamba activate rnencodec   
 
 # (or, with conda)
@@ -101,16 +103,15 @@ repo_root/
 │  ├─ model/                     # GRU model & config
 │  ├─ audioDataLoader/           # dataloader(s)
 │  ├─ utils/                     # downloads, IO, misc
-│  └─ configs/                   # quickstart_{infer,train}.yaml
-├─ quickstart/                   # two notebooks users should run first
+├─ quickstart/                   # two notebooks users can run first
 │  ├─ Inference.ipynb
 │  └─ Train.ipynb
 ├─ scripts/
-│  └─ download_artifacts.py      # pulls weights + dataset (verifies SHA256)
+│  └─ download_artifacts.py      # pulls quickstarts weights + dataset (verifies SHA256)
 ├─ artifacts/                    # created on first download
 │  ├─ weights/waterfill_quickstart.pt
 │  └─ data/waterfill_quickstart_hf_dataset/...
-└─ synth/                        # separate package (rtpysynth)
+└─ notebooks/                    # training, inference, visualization ... you'll need your own data
 ```
 
 ---

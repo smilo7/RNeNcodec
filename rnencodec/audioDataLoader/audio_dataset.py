@@ -1,14 +1,12 @@
 # audio_dataset.py
 # Refactor: shared base + constant/dynamic subclasses.
-# - EnCodecLatentDataset_constant: EXACT behavior as your current class (params from Arrow, expanded per frame)
+# - EnCodecLatentDataset_constant: (params from Arrow, one per file, spread over frames)
 # - EnCodecLatentDataset_dynamic:  per-frame params from sidecar <basename>.cond.npy (+ .json metadata)
 #
 # Back-compat alias:
 #   EnCodecLatentDataset = EnCodecLatentDataset_constant
 #
 # Notes:
-# - Keeps existing names: LatentDatasetConfig, _load_ecdc_codes, _parse_and_normalize_params_from_row, etc.
-# - Preserves mixing multiple files per sequence, noise, filters, etc.
 # - Dynamic class: uses sidecar metadata "names" to select columns; normalizes to [0,1] using JSON "norm.min/max".
 # - Dynamic class: complains if parameter_specs provides non-None (min,max); specs are used only to choose which params.
 
@@ -160,6 +158,7 @@ def _apply_hf_filters(ds, filters):
 
 
 # ------------------------------- Misc utilities ------------------------------
+# used for creating sequences from n different data files
 
 def _split_even(total: int, k: int) -> List[int]:
     """
@@ -337,7 +336,7 @@ class _BaseEnCodecLatentDataset(Dataset):
         Returns tensor of shape (1, n_q_total, num_frames)
         """
         try:
-            saved_data = torch.load(token_file_path, map_location='cpu')
+            saved_data = torch.load(token_file_path, map_location='cpu', weights_only=False)
             audio_codes = saved_data['audio_codes']
 
             # Handle different shapes
@@ -426,11 +425,10 @@ class _BaseEnCodecLatentDataset(Dataset):
         return True
 
 
-# ----------------------------- Constant parameters ---------------------------
+# ----------------------------- Constant (per file) parameters ---------------------------
 
 class EnCodecLatentDataset_constant(_BaseEnCodecLatentDataset):
     """
-    EXACT behavior as your original class:
       - parameters from dataset row (Arrow columns)
       - normalized with (min,max) from parameter_specs
       - expanded per frame
@@ -445,7 +443,7 @@ class EnCodecLatentDataset_constant(_BaseEnCodecLatentDataset):
         return norm_params.unsqueeze(0).expand(length, -1)
 
 
-# ----------------------------- Dynamic parameters ----------------------------
+# ----------------------------- Dynamic (per frame) parameters ----------------------------
 
 class EnCodecLatentDataset_dynamic(_BaseEnCodecLatentDataset):
     """
