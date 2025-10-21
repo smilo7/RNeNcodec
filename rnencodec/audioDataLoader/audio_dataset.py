@@ -49,7 +49,7 @@ class LatentDatasetConfig:
     cond_root: Optional[str] = None
     cond_suffix: str = ".cond.npy"
     # If True, dynamic dataset raises on missing sidecar/mismatch; else it skips those rows.
-    strict: bool = False
+    strict: bool = True
 
 
 # ------------------------------- EnCodec helpers ------------------------------
@@ -579,6 +579,195 @@ class EnCodecLatentDataset_dynamic(_BaseEnCodecLatentDataset):
             out[:, :cols] = np.clip(x, 0.0, 1.0)
 
         return torch.from_numpy(out)
+
+
+#------------------------------------------------------------------------------
+
+class EnCodecLatentDataset_dynamic_v2(_BaseEnCodecLatentDataset):
+    """
+    Per-frame conditioning from v2 sidecars:
+      <basename>.cond.npy  : [T, D] float16/32 (column order matches JSON 'features' insertion order)
+      <basename>.json      : {
+         "schema_version": 2,
+         "fps": <float>, "source_rate": <float>,
+         "features": {
+            "<name>": {"min": <float>, "max": <float>, "mean": <float>, "std": <float>,
+                       "units": "<str>", "doc_string": "<str>"},
+            ...
+         }
+      }
+
+    Behavior:
+      - Uses parameter_specs KEYS to choose which features to load.
+      - Ignores parameter_specs VALUES (must be None or (None,None)); min/max come from JSON.
+      - If strict=True, raises on missing sidecar / feature / frame mismatch; else logs and skips/zeros.
+    """
+    
+    def __init__(self, config: LatentDatasetConfig, encodec_model_path, split='train'):
+        # Validate parameter_specs values (must be None since we normalize using sidecar)
+        bad = [k for k, mm in (config.parameter_specs or {}).items() if mm not in (None, (None, None))]
+        if bad:
+            raise ValueError(
+                f"[Dynamic v2] parameter_specs should provide ONLY the keys (feature names); "
+                f"min/max must be None because we normalize using sidecar metadata. Offending keys: {bad}"
+            )
+        
+        self._json_cache: Dict[Path, dict] = {}
+        self._requested_keys = list((config.parameter_specs or {}).keys())      # <— NEW
+        self._missing_features_seen: set[str] = set()                           # <— NEW
+
+
+        super().__init__(config, encodec_model_path, split)
+
+         # One-time summary after building sequence_map
+        if self._missing_features_seen:                                          # <— NEW
+            print(f"[Dynamic v2] Missing (in at least one file): "
+                  f"{sorted(self._missing_features_seen)}")                      # <— NEW
+       
+
+    # ---- path + metadata helpers ----
+
+    def _cond_path_for(self, token_file_path: Path) -> Path:
+        """Locate .cond.npy next to the .ecdc, or mirror under cond_root if provided."""
+        if self.config.cond_root is None:
+            return token_file_path.with_suffix(self.config.cond_suffix)
+        try:
+            rel = token_file_path.relative_to(Path(self.config.dataset_path))
+            return Path(self.config.cond_root) / rel.with_suffix(self.config.cond_suffix)
+        except Exception:
+            return Path(self.config.cond_root) / token_file_path.name.replace(".ecdc", self.config.cond_suffix)
+
+    def _read_sidecar_meta(self, cpath: Path) -> dict:
+        jpath = cpath.with_suffix(SIDECAR_JSON_SUFFIX)
+        if jpath in self._json_cache:
+            return self._json_cache[jpath]
+        meta = {}
+        if jpath.exists():
+            try:
+                meta = json.loads(jpath.read_text(encoding="utf-8"))
+            except Exception as e:
+                print(f"[Dynamic v2] Warning: failed to read sidecar JSON {jpath}: {e}")
+        self._json_cache[jpath] = meta
+        return meta
+
+    # ---- subclass hooks ----
+
+    def _validate_row_for_subclass(self, token_file_path: Path, num_frames: int) -> bool:
+        cpath = self._cond_path_for(token_file_path)
+        if not cpath.exists():
+            msg = f"[Dynamic v2] Missing sidecar for {token_file_path} -> {cpath}"
+            if self.config.strict:
+                raise FileNotFoundError(msg)
+            print(msg)
+            return False
+        try:
+            arr = np.load(cpath, mmap_mode="r")
+            if arr.ndim != 2:
+                raise ValueError(f"Sidecar {cpath} must be 2D [T,D], got {arr.shape}")
+            if arr.shape[0] != num_frames:
+                msg = f"[Dynamic v2] Frame mismatch (codes={num_frames}, cond={arr.shape[0]}) for {token_file_path}"
+                if self.config.strict:
+                    raise ValueError(msg)
+                print(msg)
+                return False
+
+            meta = self._read_sidecar_meta(cpath)
+            feats = meta.get("features", {})
+            if not isinstance(feats, dict) or not feats:
+                msg = f"[Dynamic v2] JSON lacks 'features' dict: {cpath.with_suffix(SIDECAR_JSON_SUFFIX)}"
+                if self.config.strict:
+                    raise ValueError(msg)
+                print(msg)
+                return False
+
+            # ---- NEW: check requested keys exist in this file ----
+            if self._requested_keys:
+                missing_here = [k for k in self._requested_keys if k not in feats]
+                if missing_here:
+                    if self.config.strict:
+                        raise KeyError(f"[Dynamic v2] Requested features {missing_here} "
+                                       f"not present in {cpath.with_suffix(SIDECAR_JSON_SUFFIX)}")
+                    # collect for a single summary later (avoid per-file spam)
+                    self._missing_features_seen.update(missing_here)
+            # -----------------------------------------
+
+        except Exception as e:
+            if self.config.strict:
+                raise
+            print(f"[Dynamic v2] Unreadable sidecar {cpath}: {e}")
+            return False
+        return True
+
+    def _cond_for_segment(self, row, token_file_path: Path, start: int, length: int) -> torch.Tensor:
+        cpath = self._cond_path_for(token_file_path)
+        try:
+            arr = np.load(cpath, mmap_mode="r")  # [T, D]
+        except Exception as e:
+            if self.config.strict:
+                raise
+            P = len(self.config.parameter_specs or {})
+            return torch.zeros((length, P), dtype=torch.float32)
+
+        meta = self._read_sidecar_meta(cpath)
+        feats = meta.get("features", {})
+        if not isinstance(feats, dict) or not feats:
+            if self.config.strict:
+                raise ValueError(f"[Dynamic v2] Missing/invalid 'features' in JSON for {cpath}")
+            P = len(self.config.parameter_specs or {})
+            return torch.zeros((length, P), dtype=torch.float32)
+
+        # Column order = insertion order of feats keys when sidecar was written
+        names_in_order = list(feats.keys())
+        name_to_idx = {n: i for i, n in enumerate(names_in_order)}
+
+        keys = list(self.config.parameter_specs.keys())
+        P = len(keys)
+        out = np.zeros((length, P), dtype=np.float32)
+
+        # slice the frame window once
+        if start < 0 or start + length > arr.shape[0]:
+            if self.config.strict:
+                raise IndexError(f"[Dynamic v2] window [{start}:{start+length}) out of bounds for {cpath}")
+            start = max(0, min(start, arr.shape[0]))
+            end = min(arr.shape[0], start + length)
+        else:
+            end = start + length
+        window = arr[start:end]  # shape (length, D) or smaller if clamped above
+
+        for j, k in enumerate(keys):
+            if k not in name_to_idx:
+                msg = f"[Dynamic v2] Sidecar missing requested feature '{k}' for {token_file_path}"
+                if self.config.strict:
+                    raise KeyError(msg)
+                # leave zeros
+                continue
+
+            col = name_to_idx[k]
+            if col >= window.shape[1]:
+                if self.config.strict:
+                    raise IndexError(f"[Dynamic v2] Column {col} out of range in {cpath}")
+                continue
+
+            x = window[:, col].astype(np.float32, copy=False)
+
+            # normalize with v2 per-feature min/max
+            fmeta = feats.get(k, {})
+            vmin = fmeta.get("min", None)
+            vmax = fmeta.get("max", None)
+            if isinstance(vmin, (int, float)) and isinstance(vmax, (int, float)) and vmax != vmin:
+                x = (x - float(vmin)) / (float(vmax) - float(vmin) + 1e-8)
+                np.clip(x, 0.0, 1.0, out=x)
+            # else: leave as-is (already scaled) — or you could clamp
+
+            # pad if window was shorter (should be rare if lengths validated)
+            if x.shape[0] < length:
+                pad = np.zeros((length - x.shape[0],), dtype=np.float32)
+                x = np.concatenate([x, pad], axis=0)
+
+            out[:, j] = x
+
+        return torch.from_numpy(out)
+
 
 
 # -------------------------- Back-compat class alias --------------------------
