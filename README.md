@@ -29,6 +29,7 @@ micromamba activate rnencodec
 # (or, with conda)
 # conda env create -f environment.yml
 # conda activate rnencodec
+# python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
 ```
 
 ---
