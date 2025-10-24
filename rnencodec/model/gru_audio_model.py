@@ -4,38 +4,63 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import List, Optional, Literal
 
-TrainSampleMode = Literal["argmax","gumbel","sample"]
+CascadeMode = Literal["hard", "soft"]
+HardSampleMode = Literal["argmax","gumbel","sample"]
 
 @dataclass
 class GRUModelConfig:
-   input_size: int = 128  # 128D latent vectors
-   cond_size: int = 3
-   hidden_size: int = 48
-   num_layers: int = 4
-   n_q: int = 8  # Number of quantization levels (codebooks)
-   codebook_size: int = 1024  # Size of each codebook
-   dropout: float = 0.1
-   inp_proportion = 1
-   cond_proportion = 1
-   # training-time sampling (affects gradients/dynamics)
-   train_sample_mode: TrainSampleMode = "sample"
-   gumbel_tau_start: float = 1.0
-   gumbel_tau_end: float = 0.5
-   straight_through: bool = True
+    # core
+    input_size: int = 128
+    cond_size: int = 3
+    hidden_size: int = 48
+    num_layers: int = 4
+    n_q: int = 8
+    codebook_size: int = 1024
+    dropout: float = 0.1
+    inp_proportion: int = 1
+    cond_proportion: int = 1
+
+    # training-time knobs you already have
+    gumbel_tau_start: float = 1.0
+    gumbel_tau_end: float = 0.5
+    straight_through: bool = True
+
+    # cascade selection
+    cascade: CascadeMode = "soft"  # "hard" | "soft"
+
+    # HARD cascade knobs
+    hard_sample_mode: HardSampleMode = "sample"
+    top_n_hard: Optional[int] = None
+    temperature_hard: float = 1.0
+
+    # SOFT cascade knobs (RNG-free unless you later add gumbel-soft)
+    tau_soft: float = 0.6
+    top_n_soft: Optional[int] = None  # optional sparse softmax (still deterministic)
+
 
 class RNN(nn.Module):
    def __init__(self, config: GRUModelConfig, encodec_model):
        super(RNN, self).__init__()
        self.config = config
 
-       
-       
        self.input_size = config.input_size
        self.cond_size = config.cond_size
        self.hidden_size = config.hidden_size
        self.n_q = config.n_q
        self.codebook_size = config.codebook_size
        self.num_layers = config.num_layers
+
+       # --- cascade & knobs from config (single source of truth) ---
+       self.cascade = config.cascade
+
+        # hard
+       self.hard_sample_mode = config.hard_sample_mode
+       self.top_n_hard = config.top_n_hard
+       self.temperature_hard = config.temperature_hard
+
+        # soft
+       self.tau_soft = config.tau_soft
+       self.top_n_soft = config.top_n_soft
 
 
        # input projection to RNN model size, split btween content and conditioning parameters
@@ -81,117 +106,95 @@ class RNN(nn.Module):
    
 #---------------------           Unified sampling   ---------------------------------
 
-   def forward(self,
-            input,
-            hidden,
-            target_codebook_latents=None,
-            use_teacher_forcing=False,
-            temperature=1.0,
-            batch_size=1,
-            *,
-            sample_mode: str | None = None, # "argmax" | "gumbel" | "sample"
-            top_n: int | None = None, # optional top-k restriction
-            gumbel_tau: float | None = None,
-
-               
-            return_step_latent: bool = True   # return sum of per-level latents this step
-            ):
+   def forward(
+    self,
+    input: torch.Tensor,
+    hidden: torch.Tensor,
+    target_codebook_latents: Optional[List[torch.Tensor]] = None,
+    use_teacher_forcing: bool = False,
+    *,
+    return_step_latent: bool = True,
+    ):  
         """
         Args:
-            input: (batch_size, input_size + cond_size) - 128D latent + conditioning
+            input:  (B, input_size + cond_size)
             hidden: GRU hidden state
-            target_codebook_latents: Optional[List[Tensor]] - 128D latents per codebook (teacher forcing)
-            use_teacher_forcing: bool - whether to use teacher forcing
-            temperature: float - sampling temperature (used for gumbel/sample)
-            batch_size: int
-            sample_mode: "argmax" | "gumbel" | "sample"
-            top_n: if set, restrict sampling to top_n logits (top-k)
-            return_step_latent: also return (batch, 128) sum of all codebook latents for this step
+            target_codebook_latents: optional [n_q x (B,128)] for teacher forcing
+            use_teacher_forcing: bool
+            return_step_latent: include per-step latent sum in outputs
 
         Returns:
-            logits_list: List[Tensor], each (batch_size, codebook_size)
-            hidden: updated GRU hidden
-            sampled_indices: (batch_size, n_q) LongTensor of the ONE set of tokens used (None if pure TF)
-            step_latent: (batch_size, 128) sum of per-level latents for this step (or None if disabled)
+            logits_list: [n_q x (B, K)]
+            hidden:      updated hidden
+            sampled_indices: (B, n_q) LongTensor or None (soft/TF)
+            step_latent: (B, 128) or None
         """
 
-        sample_mode = sample_mode or self.config.sample_mode
-        top_n = top_n or self.config.top_n
-        gumbel_tau = gumbel_tau or self.config.gumbel_tau_start
+        B = input.size(0)
+        device = input.device
 
-       
-        # Split the input and process through GRU
-        latent_part = input[:, :self.input_size]           # (batch, 128)
-        cond_part   = input[:, self.input_size:]           # (batch, cond_size)
+        # --- project + GRU ---
+        latent_part = input[:, :self.input_size]
+        cond_part   = input[:, self.input_size:]
+        h_in = torch.cat([self.latent_proj(latent_part), self.cond_proj(cond_part)], dim=-1)
+        h_out, hidden = self.gru(h_in.view(B, 1, -1), hidden)
+        h_out = h_out.view(B, -1)
 
-        assert latent_part.abs().max().item() < 1.05, f"Max absolute value {latent_part.abs().max().item():.3f} >= 1.05"
+        logits_list: List[torch.Tensor] = []
+        sampled_tokens_list: List[Optional[torch.Tensor]] = []
+        cumulative_latent = torch.zeros(B, self.input_size, device=device)
+        step_latent_sum   = torch.zeros(B, self.input_size, device=device)
 
-        latent_h = self.latent_proj(latent_part)
-        cond_h   = self.cond_proj(cond_part)
-        h1 = torch.cat([latent_h, cond_h], dim=-1)
-
-        h_out, hidden = self.gru(h1.view(batch_size, 1, -1), hidden)
-        h_out = h_out.view(batch_size, -1)
-
-        # Sequential codebook prediction with unified sampling
-        logits = []
-        device = h_out.device
-        cumulative_latent = torch.zeros(batch_size, self.input_size, device=device)  # running 128D sum
-        sampled_tokens_list = []   # collect per-q sampled indices (B,)
-
-        for codebook_idx in range(self.n_q):
-            decoder_input = torch.cat([h_out, cumulative_latent], dim=-1)
-            codebook_logits = self.decoders[codebook_idx](decoder_input)   # (B, K)
-            logits.append(codebook_logits)
+        for q in range(self.n_q):
+            # decoder head
+            dec_in = torch.cat([h_out, cumulative_latent], dim=-1)
+            logits_q = self.decoders[q](dec_in)        # (B, K)
+            logits_list.append(logits_q)
 
             if use_teacher_forcing and target_codebook_latents is not None:
+                # teacher-forced: drive next level with GT latents
+                e_q = target_codebook_latents[q]       # (B, 128)
                 sampled_tokens_list.append(None)
-                if codebook_idx < self.n_q - 1:
-                    cumulative_latent = cumulative_latent + target_codebook_latents[codebook_idx]  # (B,128)
+            elif self.cascade == "soft":
+                # SOFT (deterministic) — optional sparse top-k before softmax
+                logits_soft = logits_q
+                if self.top_n_soft is not None and self.top_n_soft < logits_soft.size(-1):
+                    vals, inds = logits_soft.topk(self.top_n_soft, dim=-1)           # (B, top_k)
+                    masked = torch.full_like(logits_soft, torch.finfo(logits_soft.dtype).min)
+                    logits_soft = masked.scatter(-1, inds, vals)
+
+                weights = torch.softmax(logits_soft / max(self.tau_soft, 1e-6), dim=-1)  # (B, K)
+                E_q = self._E_eff[q]                    # (K, D)
+                e_q = weights @ E_q                     # (B, D)
+                sampled_tokens_list.append(None)        # no hard sample in soft mode
             else:
-                # --- sample ONCE here and reuse it everywhere else ---
+                # HARD: choose token then embed it
                 idx_q = self._select_tokens(
-                    codebook_logits,
-                    mode=sample_mode,
-                    temperature=temperature,
-                    top_n=top_n
+                    logits_q,
+                    mode=self.hard_sample_mode,
+                    temperature=self.temperature_hard,
+                    top_n_hard=self.top_n_hard,
                 )  # (B,)
+                e_q = self._code_to_latent_level(q, idx_q, out_device=device)   # (B,128)
                 sampled_tokens_list.append(idx_q)
 
-                if codebook_idx < self.n_q - 1:
-                    decoded_latent = self._code_to_latent_level(
-                        codebook_idx,
-                        idx_q,
-                        out_device=device
-                    )  # (B,128)
-                    cumulative_latent = cumulative_latent + decoded_latent
+            # drive next level + accumulate
+            if q < self.n_q - 1:
+                cumulative_latent = cumulative_latent + e_q
+            step_latent_sum = step_latent_sum + e_q
 
-        # Package sampled indices (B, n_q) or None if TF
-        sampled_indices = None
-        if any(t is not None for t in sampled_tokens_list):
-            sampled_indices = torch.stack([t if t is not None else torch.full((batch_size,), -1, device=device, dtype=torch.long)
-                                        for t in sampled_tokens_list], dim=1)  # (B, n_q)
+        sampled_indices = (
+            torch.stack(
+                [t if t is not None else torch.full((B,), -1, device=device, dtype=torch.long)
+                for t in sampled_tokens_list],
+                dim=1,
+            )
+            if any(t is not None for t in sampled_tokens_list) else None
+        )
 
-        # Compute per-step latent sum if requested
-        step_latent = None
-        if return_step_latent:
-            if use_teacher_forcing and target_codebook_latents is not None:
-                step_latent = torch.stack(target_codebook_latents, dim=0).sum(dim=0)  # (B,128)
-            else:
-                if sampled_indices is None:
-                    step_latent = torch.zeros(batch_size, self.input_size, device=device)
-                else:
-                    step_latent = torch.zeros(batch_size, self.input_size, device=device)
-                    for q in range(self.n_q):
-                        idx_q = sampled_indices[:, q]  # (B,)
-                        if (idx_q >= 0).any():
-                            e_q = self._code_to_latent_level(q, idx_q.clamp_min(0), out_device=device)  # (B,128)
-                            if (idx_q < 0).any():
-                                mask = (idx_q >= 0).float().unsqueeze(-1)
-                                e_q = e_q * mask
-                            step_latent = step_latent + e_q
+        step_latent = step_latent_sum if return_step_latent else None
+        return logits_list, hidden, sampled_indices, step_latent
 
-        return logits, hidden, sampled_indices, step_latent
 
 ####################################################################
 #  Helpers
@@ -202,7 +205,7 @@ class RNN(nn.Module):
         logits_k: torch.Tensor, *,            # (..., K)
         mode: str = "gumbel",                 # "argmax" | "gumbel" | "sample"
         temperature: float = 1.0,
-        top_n: int | None = None,
+        top_n_hard: int | None = None,
     ) -> torch.LongTensor:
         K = logits_k.size(-1)
     
@@ -210,17 +213,17 @@ class RNN(nn.Module):
         if mode == "argmax" or temperature <= 0:
             return logits_k.argmax(dim=-1)
     
-        # Sanitize top_n
-        if top_n is not None:
-            top_n = int(top_n)
-            if top_n < 1:
-                raise ValueError("top_n must be >= 1")
-            if top_n >= K:
-                top_n = None  # full set
+        # Sanitize top_n_hard
+        if top_n_hard is not None:
+            top_n_hard = int(top_n_hard)
+            if top_n_hard < 1:
+                raise ValueError("top_n_hard must be >= 1")
+            if top_n_hard >= K:
+                top_n_hard = None  # full set
     
         t = 1e-6 if temperature <= 0 else temperature
     
-        if top_n is None:
+        if top_n_hard is None:
             if mode == "gumbel":
                 g = torch.empty_like(logits_k).exponential_().log_().neg_()  # ~Gumbel(0,1)
                 return (logits_k / t + g).argmax(dim=-1)
@@ -233,24 +236,24 @@ class RNN(nn.Module):
                 raise ValueError(f"unknown mode: {mode!r}")
     
         # Restrict to top-k slice
-        vals, inds = logits_k.topk(top_n, dim=-1)  # inds: (..., top_n)
+        vals, inds = logits_k.topk(top_n_hard, dim=-1)  # inds: (..., top_n_hard)
     
         if mode == "gumbel":
             g   = torch.empty_like(vals).exponential_().log_().neg_()
             sel = (vals / t + g).argmax(dim=-1)                # (...,)
         elif mode == "sample":
             probs = torch.softmax(vals / t, dim=-1)
-            flat  = probs.view(-1, top_n)
+            flat  = probs.view(-1, top_n_hard)
             sel   = torch.multinomial(flat, 1).view(*probs.shape[:-1]).squeeze(-1)  # (...,)
         else:
             raise ValueError(f"unknown mode: {mode!r}")
     
         # Map back to original indices — handle 1D and batched cases
         if inds.dim() == 1:
-            # Unbatched: inds (top_n,), sel scalar
+            # Unbatched: inds (top_n_hard,), sel scalar
             return inds[sel]
         else:
-            # Batched: make sel shape (..., 1) to match inds (..., top_n)
+            # Batched: make sel shape (..., 1) to match inds (..., top_n_hard)
             sel_exp = sel.view(*inds.shape[:-1], 1).long()
             return inds.gather(-1, sel_exp).squeeze(-1)
 
@@ -346,6 +349,28 @@ class RNN(nn.Module):
             z = z.to(out_device, non_blocking=True)
         return z
        
+
+    # NEW: expected latent for one codebook
+   def _expected_latent_from_logits(
+        self,
+        logits: torch.Tensor,       # (B, K)
+        E_q: torch.Tensor,          # (K, D)
+        *, 
+        tau: float = 1.0,
+        top_n_hard: Optional[int] = None
+    ) -> torch.Tensor:              # (B, D)
+        # Optional top-k mask before softmax
+        if top_n_hard is not None and top_n_hard < logits.size(-1):
+            vals, inds = logits.topk(top_n_hard, dim=-1)           # (B, top_n_hard)
+            masked = torch.full_like(logits, torch.finfo(logits.dtype).min)
+            logits = masked.scatter(-1, inds, vals)
+
+        probs = torch.softmax(logits / max(tau, 1e-6), dim=-1)  # (B, K)
+        # (B,K) @ (K,D) -> (B,D)
+        return probs @ E_q
+
+
+
    def _soft_and_hard_from_logits(self, logits_btnk: torch.Tensor, tau: float = 0.5, use_gumbel: bool = False):
         """
         Prepare for soft/ST training (not used yet).

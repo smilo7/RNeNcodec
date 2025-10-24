@@ -15,12 +15,12 @@ from typing import Literal
 from rnencodec.model.gru_audio_model import RNN, GRUModelConfig
 #from rnencodec.audioDataLoader.audio_dataset import  efficient_codes_to_latents, preprocess_latents_for_RNN # , latents_to_audio_simple,
 from rnencodec.audioDataLoader.audio_dataset import  preprocess_latents_for_RNN # , latents_to_audio_simple,
-ValidSampleMode = Literal["argmax", "gumbel", "sample"]
+
 spf = 320
 
 class RNNGenerator():
     @classmethod
-    def from_checkpoint(cls, checkpoint_path: str, model_config: GRUModelConfig, data_config, enc_model, chunksize: int, hopsize: int, sample_mode: str, top_n: int, temperature: float,
+    def from_checkpoint(cls, checkpoint_path: str, model_config: GRUModelConfig, data_config, enc_model, chunksize: int, hopsize: int,  
         *,
         strict: bool = True,
         map_location: Optional[torch.device | str] = None,
@@ -40,9 +40,9 @@ class RNNGenerator():
         model.load_state_dict(state, strict=False)  # False if your export is fp16; True if fp32
         model.to(device).eval()
 
-        return cls(model=model, model_config=model_config, data_config=data_config, enc_model=enc_model, chunksize=chunksize, hopsize=hopsize, sample_mode=sample_mode, top_n=top_n, temperature=temperature)
+        return cls(model=model, model_config=model_config, data_config=data_config, enc_model=enc_model, chunksize=chunksize, hopsize=hopsize)
     
-    def __init__(self, model, model_config, data_config, enc_model, chunksize, hopsize, sample_mode: str, top_n, temperature) : 
+    def __init__(self, model, model_config, data_config, enc_model, chunksize, hopsize) : 
 
         
         self.model=model
@@ -59,10 +59,6 @@ class RNNGenerator():
 
         self.chunksize=chunksize
         self.hopsize=hopsize
-
-        self.top_n=top_n
-        self.temperature=temperature
-        self.sample_mode = sample_mode
 
         #state between call to generate steps
         self.hidden = None # updated on every sequence step in warmup and in run_inference
@@ -134,10 +130,6 @@ class RNNGenerator():
                     next_input_full,
                     self.hidden,
                     use_teacher_forcing=False,
-                    temperature=self.temperature,
-                    batch_size=1,
-                    sample_mode=("sample" if (self.sample_mode=="sample" and self.top_n and self.top_n > 0) else "argmax"),
-                    top_n=self.top_n,
                     return_step_latent=True,
                 )
 
