@@ -126,6 +126,7 @@ class RNNGenerator():
                 else:
                     next_input_full = in_latent
     
+                #  CALL THE RNN ------------------------------------------------------
                 logits_list, self.hidden, sampled_indices, step_latent = self.model(
                     next_input_full,
                     self.hidden,
@@ -134,6 +135,9 @@ class RNNGenerator():
                 )
 
                 codes_nt[:, t] = sampled_indices[0]
+                # print(f'len(logits_list) is {len(logits_list)}')
+                # print(f'shape of logits_list[0] is {logits_list[0].shape}')
+                # assert False
                 # keep computing current_latent from model output for possible later use
                 self.current_latent = preprocess_latents_for_RNN(step_latent, self.clamp_val)
     
@@ -220,6 +224,198 @@ class RNNGenerator():
 
 
 
+#################################################################################
+#################################################################################
+#################################################################################
+
+class RNNGeneratorSoft:
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str, model_config: GRUModelConfig, data_config, enc_model, chunksize: int, hopsize: int,
+                        *, strict: bool = True, map_location: Optional[torch.device | str] = None) -> "RNNGeneratorSoft":
+        device = getattr(enc_model, "device", None)
+        print(f'Initializing the RNNGeneratorSoft on device = {device}')
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Build model, load weights
+        model = RNN(model_config, enc_model).to(device)
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        state = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state, strict=False)
+        model.to(device).eval()
+
+        return cls(model=model, model_config=model_config, data_config=data_config, enc_model=enc_model,
+                   chunksize=chunksize, hopsize=hopsize)
+
+    def __init__(self, model, model_config, data_config, enc_model, chunksize, hopsize):
+        self.model = model.eval()
+        self.model_config = model_config
+        self.data_config = data_config
+        self.enc_model = enc_model
+        self.dev = next(self.enc_model.parameters()).device
+
+        self.codebook_size = self.model.config.codebook_size
+        self.n_q = self.model.config.n_q
+        self.cond_size = self.model.config.cond_size
+        self.clamp_val = data_config.clamp_val
+
+        self.chunksize = chunksize
+        self.hopsize = hopsize
+
+        self.hidden = None
+
+        sd = 0.33
+        self.current_latent = torch.clamp(torch.randn(1, 128) * sd, -3*sd, 3*sd).to(self.dev)
+        self.codebuf = torch.zeros(self.n_q, self.chunksize, dtype=torch.long, device=self.dev)
+
+    # ---- helper: sample from logits (vectorized top-k/temperature/gumbel) ----
+    @staticmethod
+    def _select_from_logits(
+        logits: torch.Tensor,  # (B, K)
+        mode: Literal["argmax", "gumbel", "sample"] = "sample",
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+    ) -> torch.LongTensor:
+        B, K = logits.shape
+
+        # Optional top-k mask
+        if top_k is not None and 1 <= top_k < K:
+            vals, inds = logits.topk(top_k, dim=-1)
+            masked = torch.full_like(logits, torch.finfo(logits.dtype).min)
+            logits_eff = masked.scatter(-1, inds, vals)
+        else:
+            logits_eff = logits
+
+        if mode == "argmax" or temperature <= 0:
+            return logits_eff.argmax(dim=-1)
+
+        t = max(temperature, 1e-6)
+
+        if mode == "gumbel":
+            g = torch.empty_like(logits_eff).exponential_().log_().neg_()  # ~Gumbel(0,1)
+            return (logits_eff / t + g).argmax(dim=-1)
+
+        # "sample"
+        probs = torch.softmax(logits_eff / t, dim=-1)
+        return torch.multinomial(probs, 1).squeeze(-1)
+
+    # ---- core: run model for T steps, return logits (n_q, T, K) ----
+    def run_inference(self, params_seq, *, hop: int | None = None, latent_seq=None):
+        """
+        params_seq: None, (cond_size,), or (T, cond_size)
+        latent_seq: None or (T, 128)
+        returns: logits_nqtk (n_q, T, K) on self.dev
+        """
+        T = hop
+        dev = self.dev
+        K = self.codebook_size
+        n_q = self.n_q
+        latent_size = self.current_latent.shape[-1]
+
+        # Normalize/prepare conditioning
+        if params_seq is None or self.cond_size == 0:
+            cond_mat = None
+        else:
+            cond = torch.as_tensor(params_seq, device=dev, dtype=torch.float32)
+            if cond.dim() == 1:
+                T = int(T) if T is not None else 1
+                cond_mat = cond.view(1, -1).expand(T, -1).contiguous()
+            elif cond.dim() == 2:
+                T = cond.size(0) if T is None else int(T)
+                cond_mat = cond
+                assert cond_mat.size(0) >= T, "params_seq shorter than T"
+            else:
+                raise ValueError("params_seq must be (cond_size,) or (T, cond_size)")
+
+        # Optional external latent seq
+        lat_mat = None
+        if latent_seq is not None:
+            lat_mat = torch.as_tensor(latent_seq, device=dev, dtype=torch.float32)
+            assert lat_mat.dim() == 2 and lat_mat.size(1) == latent_size
+            if T is None:
+                T = lat_mat.size(0)
+            else:
+                assert lat_mat.size(0) == T, "latent_seq and params_seq must have same T"
+
+        if T is None:
+            raise ValueError("T could not be inferred; provide params_seq or latent_seq, or pass hop.")
+        T = int(T)
+
+        logits_nqtk = torch.empty(self.n_q, T, K, device=dev, dtype=torch.float32)
+
+        with torch.inference_mode():
+            for t in range(T):
+                in_latent = lat_mat[t:t+1] if lat_mat is not None else self.current_latent
+                if cond_mat is not None:
+                    next_input_full = torch.cat([in_latent, cond_mat[t:t+1]], dim=-1)
+                else:
+                    next_input_full = in_latent
+
+                # Model must be configured for cascade="soft" in its config
+                logits_list, self.hidden, sampled_indices, step_latent = self.model(
+                    next_input_full, self.hidden, use_teacher_forcing=False, return_step_latent=True
+                )
+
+                # Collect logits for this step (n_q, K)
+                for q, lq in enumerate(logits_list):
+                    logits_nqtk[q, t] = lq[0]
+
+                # Keep updating the running latent from the model’s step_latent
+                self.current_latent = preprocess_latents_for_RNN(step_latent, self.clamp_val)
+
+        return logits_nqtk
+
+    # ---- sample logits → tokens, maintain FIFO, return (n_q, T) ----
+    def getNextCodeChunk(self, params, *, hop: int | None = None, latent_seq=None):
+        with torch.inference_mode():
+            logits_nqtk = self.run_inference(params, hop=hop, latent_seq=latent_seq)  # (n_q, T, K)
+            n_q, T, K = logits_nqtk.shape
+
+            # Sampling knobs from model config (hard-style knobs used post-soft)
+            mode = getattr(self.model.config, "hard_sample_mode", "sample")
+            topk = getattr(self.model.config, "top_n_hard", None)
+            temp = getattr(self.model.config, "temperature_hard", 1.0)
+
+            # Vectorized sampling: reshape to (n_q*T, K)
+            flat = logits_nqtk.permute(1, 0, 2).reshape(-1, K)  # (T*n_q, K)
+            idx_flat = self._select_from_logits(flat, mode=mode, temperature=temp, top_k=topk)
+            new_codes = idx_flat.view(T, n_q).transpose(0, 1).contiguous()  # (n_q, T)
+
+            # FIFO exactly like your original
+            buf = self.codebuf
+            h = new_codes.size(1)
+            if h >= self.chunksize:
+                buf.copy_(new_codes[:, -self.chunksize:])
+                warnings.warn(f"Warning: chunk size {self.chunksize} <= hop size {h}. Returning full hop.")
+                return new_codes
+            else:
+                buf[:, :-h] = buf[:, h:]     # shift left
+                buf[:, -h:] = new_codes      # append
+            return buf
+
+    # ---- decode the most recent hop’s worth of audio (unchanged) ----
+    def getNextAudioHop(self, params, *, hop: int | None = None, latent_seq=None):
+        with torch.inference_mode():
+            codes = self.getNextCodeChunk(params, hop=hop, latent_seq=latent_seq)  # (n_q, T)
+            codes_bnt = codes.unsqueeze(0)  # (1, n_q, T)
+
+            audio_t = self.enc_model.decode([codes_bnt], audio_scales=[None])[0]
+            if audio_t.ndim == 3:
+                audio_t = audio_t[0, 0]
+            elif audio_t.ndim == 2:
+                audio_t = audio_t[0]
+
+            alen = (hop or self.hopsize) * spf
+            return audio_t[-alen:].to("cpu", non_blocking=True).contiguous().numpy()
+
+    def warmup(self, params, hop: int, sigma: float = 0.1):
+        dev = self.dev
+        if self.cond_size:
+            assert len(params) == self.cond_size, f"params length {len(params)} != cond_size {self.cond_size}"
+        p = torch.as_tensor(params, dtype=torch.float32, device=dev).view(1, -1).expand(hop, -1)
+        latent_size = self.current_latent.shape[-1]
+        latent_seq  = torch.randn(hop, latent_size, device=dev) * sigma
+        return self.getNextAudioHop(p, latent_seq=latent_seq, hop=hop)
 
 
 
