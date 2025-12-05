@@ -55,12 +55,20 @@ class EncodecRTPlayer(BaseGenerator):
    
 
     # -----------------------
-    def __init__(self, rnngen, sr, frame_rate, buffersize,   chunksize, hopsize,  init_norm_params=None, param_labels=None, warmupsteps=10):
+    def __init__(self, rnngen, sr, frame_rate, buffersize,   chunksize, hopsize,  init_norm_params=None, param_labels=None, warmupsteps=10, desc_vals=None):
 
         self.units_p=np.zeros_like(init_norm_params)
+        self.desc_vals=desc_vals
+        
+        self._last_error = ""
+        self._decodetime = 0.0
+        self._callrecord = ""
+        self._setnormval = ""
+        
         super().__init__(init_norm_params or [0.5, 0.6])  # defaults
         print(f'Initialize EncodecRTPlayer')
         self.set_params(self.norm_params)  # initialize semantic values
+        
 
         self.param_labels = param_labels
         
@@ -85,9 +93,7 @@ class EncodecRTPlayer(BaseGenerator):
         self.seeding_len = self.chunksizeframes - self.framehopsize
         self.genaudioframe = 0      # mth frame we've generated in total
 
-        self._last_error = ""
-        self._decodetime = 0.0
-        self._callrecord = ""
+
 
         # small scratch buffer to avoid per-callback allocations (optional)
         self._scratch = np.empty(self.buffersize, dtype=np.float32)
@@ -227,6 +233,16 @@ class EncodecRTPlayer(BaseGenerator):
     # -----------------------
     # This first sets the norm_params, and the units_params which are just used for display (the norm_params are the ones sent to the synth)
     def set_params(self, norm_params):
+
+        # self._setnormval += "; "
+        for i in range(len(norm_params)) :
+            if self.desc_vals != None:
+                
+                if self.desc_vals[i] != 0:
+                    norm_params[i]=round(norm_params[i]*(self.desc_vals[i]-1))/(self.desc_vals[i]-1) # -1 to get n-1 intervals with n points inclusive of endpoints 
+                    # self._setnormval += f"{norm_params[i]} "
+                    
+        
         super().set_params(norm_params)
         # Map [0,1] → semantic values (your mapping)
         # self.freq = float(exp_map01(self.norm_params[0], 20.0, 2000.0))  # exponential Hz
@@ -243,5 +259,5 @@ class EncodecRTPlayer(BaseGenerator):
     def formatted_readouts(self):
         # Optional: pretty labels shown next to sliders
 
-        return [f"{label}: {val:.1f} label" for label, val in zip(self.param_labels, self.units_p)]
+        return [f"{label}: {val:.2f} label" for label, val in zip(self.param_labels, self.units_p)]
             
