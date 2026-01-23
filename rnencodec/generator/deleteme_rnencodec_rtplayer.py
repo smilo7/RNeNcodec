@@ -55,17 +55,22 @@ class EncodecRTPlayer(BaseGenerator):
    
 
     # -----------------------
-    def __init__(self, rnngen, sr, frame_rate, buffersize,   chunksize, hopsize,  init_norm_params=None, param_labels=None, param_scaler=None, warmupsteps=10):
+    def __init__(self, rnngen, sr, frame_rate, buffersize,   chunksize, hopsize,  init_norm_params=None, param_labels=None, warmupsteps=10, desc_vals=None):
 
         self.units_p=np.zeros_like(init_norm_params)
+        self.desc_vals=desc_vals
+        
+        self._last_error = ""
+        self._decodetime = 0.0
+        self._callrecord = ""
+        self._setnormval = ""
+        
         super().__init__(init_norm_params or [0.5, 0.6])  # defaults
         print(f'Initialize EncodecRTPlayer')
-        
-        self.param_labels = param_labels
-        self.param_scaler = param_scaler  # ParameterScaler instance
-        self.feature_names = param_scaler.feature_names if param_scaler else None
-        
         self.set_params(self.norm_params)  # initialize semantic values
+        
+
+        self.param_labels = param_labels
         
 
         self.rnngen = rnngen
@@ -88,9 +93,7 @@ class EncodecRTPlayer(BaseGenerator):
         self.seeding_len = self.chunksizeframes - self.framehopsize
         self.genaudioframe = 0      # mth frame we've generated in total
 
-        self._last_error = ""
-        self._decodetime = 0.0
-        self._callrecord = ""
+
 
         # small scratch buffer to avoid per-callback allocations (optional)
         self._scratch = np.empty(self.buffersize, dtype=np.float32)
@@ -230,34 +233,31 @@ class EncodecRTPlayer(BaseGenerator):
     # -----------------------
     # This first sets the norm_params, and the units_params which are just used for display (the norm_params are the ones sent to the synth)
     def set_params(self, norm_params):
-        super().set_params(norm_params)
-        # Map [0,1] → semantic/real values using the scaler
+
+        # self._setnormval += "; "
+        for i in range(len(norm_params)) :
+            if self.desc_vals != None:
+                
+                if self.desc_vals[i] != 0:
+                    norm_params[i]=round(norm_params[i]*(self.desc_vals[i]-1))/(self.desc_vals[i]-1) # -1 to get n-1 intervals with n points inclusive of endpoints 
+                    # self._setnormval += f"{norm_params[i]} "
+                    
         
-        if self.param_scaler and self.feature_names:
-            # Denormalize each parameter to its real range
-            for i, feature_name in enumerate(self.feature_names):
-                self.units_p[i] = self.param_scaler.denormalize(feature_name, self.norm_params[i])
-        else:
-            # Fallback: just copy normalized values
-            for i in range(len(self.norm_params)):
-                self.units_p[i] = self.norm_params[i]
+        super().set_params(norm_params)
+        # Map [0,1] → semantic values (your mapping)
+        # self.freq = float(exp_map01(self.norm_params[0], 20.0, 2000.0))  # exponential Hz
+        # self.amp  = float(self.norm_params[1])                           # linear gain 0..1
+
+        for i in range(len(self.norm_params)) :
+            self.units_p[i] = self.norm_params[i]
+
+            # #if you want to "change the units" or the labels, you could do something like:
+            # self.units_p[1] = 64 + self.norm_params[1]*12
 
     
     # -----------------------
     def formatted_readouts(self):
-        # Display real parameter values with units
-        
-        if self.param_scaler and self.feature_names:
-            readouts = []
-            for i, feature_name in enumerate(self.feature_names):
-                real_val = self.units_p[i]
-                unit = self.param_scaler.get_unit(feature_name)
-                if unit:
-                    readouts.append(f"{feature_name}: {real_val:.2f} {unit}")
-                else:
-                    readouts.append(f"{feature_name}: {real_val:.2f}")
-            return readouts
-        else:
-            # Fallback: show normalized values with labels
-            return [f"{label}: {val:.2f}" for label, val in zip(self.param_labels, self.units_p)]
+        # Optional: pretty labels shown next to sliders
+
+        return [f"{label}: {val:.2f} label" for label, val in zip(self.param_labels, self.units_p)]
             
