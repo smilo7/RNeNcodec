@@ -17,6 +17,9 @@ class GRUModelConfig:
     n_q: int = 8
     codebook_size: int = 1024
     dropout: float = 0.1
+
+    
+    
     inp_proportion: int = 1
     cond_proportion: int = 1
 
@@ -27,6 +30,7 @@ class GRUModelConfig:
 
     # cascade selection
     cascade: CascadeMode = "soft"  # "hard" | "soft"
+
 
     # HARD cascade knobs
     hard_sample_mode: HardSampleMode = "sample"

@@ -768,6 +768,198 @@ class EnCodecLatentDataset_dynamic_v2(_BaseEnCodecLatentDataset):
 
         return torch.from_numpy(out)
 
+# -----------------------------------------------------------------------------
+
+
+class EnCodecLatentDataset_dynamic_v3(_BaseEnCodecLatentDataset):
+    """
+    Conditioning from a single global config + per-file .cond.npy:
+
+      Global config (once per dataset):
+        <dataset_root>/conditioning_config.json  : {
+          "schema_version": 1,
+          "fps": 75,
+          "feature_names": [...],          # defines column order in .cond.npy
+          "features": { name: {min,max,...}, ... },
+          ...
+        }
+
+      Per item:
+        <basename>.cond.npy  : [T, D] float16/32
+
+    Behavior:
+      - Uses parameter_specs KEYS to choose which features to load.
+      - Ignores parameter_specs VALUES; min/max come from conditioning_config.json.
+      - If strict=True, raises on missing sidecar / feature / frame mismatch; else logs and skips/zeros.
+    """
+
+    def __init__(self, config: LatentDatasetConfig, encodec_model_path, split="train"):
+        # 1) Validate parameter_specs values
+        bad = [k for k, mm in (config.parameter_specs or {}).items() if mm not in (None, (None, None))]
+        if bad:
+            raise ValueError(
+                f"[Dynamic v3] parameter_specs should provide ONLY the keys (feature names); "
+                f"min/max must be None because we normalize using conditioning_config.json. Offending keys: {bad}"
+            )
+
+        # 2) Predefine attributes used by hooks (so base-class calls won't crash)
+        self._requested_keys = list((config.parameter_specs or {}).keys())
+        self._missing_features_seen: set[str] = set()
+
+        self._cond_cfg_path: Path | None = None
+        self._cond_cfg: dict = {}
+        self._feature_names: list[str] = []
+        self._features_meta: dict = {}
+        self._name_to_idx: dict[str, int] = {}
+
+        # 3) Load global conditioning config BEFORE super().__init__()
+        self._cond_cfg_path, self._cond_cfg = self._load_conditioning_config_from_dataset_path(
+            Path(config.dataset_path),
+            split=split,
+        )
+        self._feature_names = list(self._cond_cfg.get("feature_names", []))
+        self._features_meta = self._cond_cfg.get("features", {})
+
+        if not self._feature_names or not isinstance(self._features_meta, dict) or not self._features_meta:
+            raise ValueError(
+                f"[Dynamic v3] conditioning_config.json missing/invalid 'feature_names' or 'features': "
+                f"{self._cond_cfg_path}"
+            )
+
+        self._name_to_idx = {n: i for i, n in enumerate(self._feature_names)}
+
+        # 4) Validate requested keys exist in global config (optional but helpful)
+        if self._requested_keys:
+            missing_global = [k for k in self._requested_keys if k not in self._features_meta]
+            if missing_global:
+                msg = f"[Dynamic v3] Requested features not present in conditioning_config.json: {missing_global}"
+                if config.strict:
+                    raise KeyError(msg)
+                print(msg)
+                self._missing_features_seen.update(missing_global)
+
+        # 5) NOW it's safe to call super; it may call _validate_row_for_subclass()
+        super().__init__(config, encodec_model_path, split)
+
+        if self._missing_features_seen:
+            print(f"[Dynamic v3] Missing (global or at least one file): {sorted(self._missing_features_seen)}")
+
+    # ---- conditioning config helpers ----
+
+    def _load_conditioning_config_from_dataset_path(self, dataset_path: Path, split: str):
+        cfg_path = dataset_path / "conditioning_config.json"
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"[Dynamic v3] Missing {cfg_path}")
+        return cfg_path, json.loads(cfg_path.read_text(encoding="utf-8"))
+    
+
+    # ---- path helper (same as v2) ----
+
+    def _cond_path_for(self, token_file_path: Path) -> Path:
+        """Locate .cond.npy next to the .ecdc, or mirror under cond_root if provided."""
+        if self.config.cond_root is None:
+            return token_file_path.with_suffix(self.config.cond_suffix)
+        try:
+            rel = token_file_path.relative_to(Path(self.config.dataset_path))
+            return Path(self.config.cond_root) / rel.with_suffix(self.config.cond_suffix)
+        except Exception:
+            return Path(self.config.cond_root) / token_file_path.name.replace(".ecdc", self.config.cond_suffix)
+
+    # ---- subclass hooks ----
+
+    def _validate_row_for_subclass(self, token_file_path: Path, num_frames: int) -> bool:
+        cpath = self._cond_path_for(token_file_path)
+        if not cpath.exists():
+            msg = f"[Dynamic v3] Missing sidecar for {token_file_path} -> {cpath}"
+            if self.config.strict:
+                raise FileNotFoundError(msg)
+            print(msg)
+            return False
+    
+        try:
+            arr = np.load(cpath, mmap_mode="r")
+            if arr.ndim != 2:
+                raise ValueError(f"Sidecar {cpath} must be 2D [T,D], got {arr.shape}")
+            if arr.shape[0] != num_frames:
+                msg = f"[Dynamic v3] Frame mismatch (codes={num_frames}, cond={arr.shape[0]}) for {token_file_path}"
+                if self.config.strict:
+                    raise ValueError(msg)
+                print(msg)
+                return False
+    
+            D_expected = len(self._feature_names)
+            if arr.shape[1] != D_expected:
+                msg = (f"[Dynamic v3] Feature dim mismatch for {token_file_path}: "
+                       f"cond has D={arr.shape[1]} but conditioning_config expects D={D_expected}")
+                if self.config.strict:
+                    raise ValueError(msg)
+                print(msg)
+                return False
+    
+        except Exception:
+            if self.config.strict:
+                raise
+            return False
+    
+        return True
+
+    def _cond_for_segment(self, row, token_file_path: Path, start: int, length: int) -> torch.Tensor:
+        cpath = self._cond_path_for(token_file_path)
+        keys = list(self.config.parameter_specs.keys())
+        P = len(keys)
+    
+        try:
+            arr = np.load(cpath, mmap_mode="r")  # [T, D]
+        except Exception:
+            if self.config.strict:
+                raise
+            return torch.zeros((length, P), dtype=torch.float32)
+    
+        # Slice window once
+        if start < 0 or start + length > arr.shape[0]:
+            if self.config.strict:
+                raise IndexError(f"[Dynamic v3] window [{start}:{start+length}) out of bounds for {cpath}")
+            start = max(0, min(start, arr.shape[0]))
+            end = min(arr.shape[0], start + length)
+        else:
+            end = start + length
+    
+        window = arr[start:end]  # (<=length, D)
+        out = np.zeros((length, P), dtype=np.float32)
+    
+        for j, k in enumerate(keys):
+            idx = self._name_to_idx.get(k, None)
+            if idx is None:
+                msg = f"[Dynamic v3] conditioning_config missing requested feature '{k}'"
+                if self.config.strict:
+                    raise KeyError(msg)
+                # leave zeros
+                continue
+    
+            if idx >= window.shape[1]:
+                if self.config.strict:
+                    raise IndexError(f"[Dynamic v3] Column {idx} out of range in {cpath}")
+                continue
+    
+            x = window[:, idx].astype(np.float32, copy=False)
+    
+            # Normalize with GLOBAL per-feature min/max (from conditioning_config.json)
+            fmeta = self._features_meta.get(k, {})
+            vmin = fmeta.get("min", None)
+            vmax = fmeta.get("max", None)
+            if isinstance(vmin, (int, float)) and isinstance(vmax, (int, float)) and vmax != vmin:
+                x = (x - float(vmin)) / (float(vmax) - float(vmin) + 1e-8)
+                np.clip(x, 0.0, 1.0, out=x)
+    
+            # Pad if window shorter (rare if validated)
+            if x.shape[0] < length:
+                pad = np.zeros((length - x.shape[0],), dtype=np.float32)
+                x = np.concatenate([x, pad], axis=0)
+    
+            out[:, j] = x
+    
+        return torch.from_numpy(out)
+            
 
 
 # -------------------------- Back-compat class alias --------------------------

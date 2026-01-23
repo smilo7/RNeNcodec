@@ -19,6 +19,7 @@ from rnencodec.audioDataLoader.audio_dataset import  preprocess_latents_for_RNN 
 spf = 320
 
 class RNNGenerator():
+    # This is just an alternative way to initialize RNNgenerator from the checkpoint data (it call the normal init code in the return
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, model_config: GRUModelConfig, data_config, enc_model, chunksize: int, hopsize: int,  
         *,
