@@ -619,12 +619,11 @@ class EnCodecLatentDataset_dynamic_v2(_BaseEnCodecLatentDataset):
 
         super().__init__(config, encodec_model_path, split)
 
-         # One-time summary after building sequence_map
+        # One-time summary after building sequence_map
         if self._missing_features_seen:                                          # <— NEW
             print(f"[Dynamic v2] Missing (in at least one file): "
                   f"{sorted(self._missing_features_seen)}")                      # <— NEW
-       
-
+            
     # ---- path + metadata helpers ----
 
     def _cond_path_for(self, token_file_path: Path) -> Path:
