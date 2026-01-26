@@ -54,25 +54,19 @@ pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128
 
 ---
 
-## 3) Get the QuickStart artifacts (weights + dataset)
+## 3) Get the QuickStart waterfill dataset 
 
-This downloads the **pretrained checkpoint** and the **example HF-format dataset**, verifies SHA256, and (for the dataset) **auto-extracts** to `artifacts/data/waterfill_quickstart_hf_dataset/`.
+Users are expected to have datasets of audio files, each with a corresponding .csv file that has parameters in columns (with parameter names as headers) at a sample rate of 75 frames per second (see 1_dataset.ipynb notebook for details). We assume this format is easy for users to create, and it is easily readable. It accommodates parameters that are dynamic  throughout a dataset sample, but also (with redundancy) static parameters. The 1_dataset.ipynb notebook then reads a dataset in this format to prepare it in a more efficient form that is ready for data loading by RNeNcodec. One such dataset already in the "user format" is **water_fill**. 
 
-```bash
-python scripts/download_artifacts.py --all
-```
+This downloads the **water_fill user-formatted datset** from Hugging Face. 
 
-You can fetch them separately:
+CD to your datadir. Then:
 
 ```bash
-python scripts/download_artifacts.py --weights
-python scripts/download_artifacts.py --dataset
+git clone https://huggingface.co/datasets/lonce/waterfill
 ```
 
-Paths used by the QuickStart notebooks/configs:
-
-- Weights: `artifacts/weights/waterfill_quickstart.pt`
-- Dataset (after extract): `artifacts/data/waterfill_quickstart_hf_dataset/`
+- You are now ready to run the 1_dataset.ipynb to prepare the dataset for loading by RNeNcodec. 
 
 ---
 
