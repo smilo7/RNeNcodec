@@ -19,7 +19,6 @@ from rnencodec.audioDataLoader.audio_dataset import  preprocess_latents_for_RNN 
 spf = 320
 
 class RNNGenerator():
-    # This is just an alternative way to initialize RNNgenerator from the checkpoint data (it call the normal init code in the return
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str, model_config: GRUModelConfig, data_config, enc_model, chunksize: int, hopsize: int,  
         *,
@@ -135,10 +134,14 @@ class RNNGenerator():
                     return_step_latent=True,
                 )
 
-                codes_nt[:, t] = sampled_indices[0]
-                # print(f'len(logits_list) is {len(logits_list)}')
-                # print(f'shape of logits_list[0] is {logits_list[0].shape}')
-                # assert False
+                # Handle soft cascade mode (sampled_indices is None)
+                if sampled_indices is None:
+                    # Soft cascade: no discrete tokens, use argmax of logits to get codes
+                    codes_nt[:, t] = torch.stack([logits.argmax(dim=-1)[0] for logits in logits_list])
+                else:
+                    # Hard cascade: use the sampled indices
+                    codes_nt[:, t] = sampled_indices[0]
+                
                 # keep computing current_latent from model output for possible later use
                 self.current_latent = preprocess_latents_for_RNN(step_latent, self.clamp_val)
     
