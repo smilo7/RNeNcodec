@@ -26,7 +26,7 @@ from dataprep.auxiliary_functions import (
 
 def infer_frames_from_ecdc(ecdc_path: Path) -> int:
     """Get the number of frames T from an .ecdc file."""
-    ckpt = torch.load(ecdc_path, map_location="cpu")
+    ckpt = torch.load(ecdc_path, map_location="cpu",weights_only=False)
     codes = ckpt["audio_codes"]
     
     # Handle different formats - codes might be a list of tensors or a single tensor
@@ -182,7 +182,7 @@ def create_sidecar_files(ecdc_path: Path, csv_path: Path, config: Dict, tokens_d
             print(f"    ⚠️  Trimming {extra_frames} extra frames from EnCodec file")
             
             # Load, trim, and save EnCodec file
-            ckpt = torch.load(ecdc_path, map_location="cpu")
+            ckpt = torch.load(ecdc_path, map_location="cpu", weights_only=False)
             codes = ckpt["audio_codes"]
             
             # Handle different formats - codes might be a list of tensors or a single tensor

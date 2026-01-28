@@ -41,6 +41,14 @@ import os
 
 _PRINT_STATE = {"on": True, "stdout": None, "stderr": None,}
 
+# ⚠️ [!]
+# ✅ [OK}
+
+import platform 
+# Detect OS and set num_workers 
+num_workers = 0 if platform.system() == 'Windows' else 4
+
+
 def print_switch(on: bool | None = None):
     global _PRINT_STATE
     if on is None:
@@ -133,7 +141,7 @@ def create_dataloaders(
     batch_size: int = 100,
     train_split: str = 'train',
     val_split: Optional[str] = 'validation',
-    num_workers: int = 4,
+    num_workers: int = num_workers,
     add_noise: bool = True,
     noise_weight: float = 0.05,
     files_per_sequence: int = 4,
@@ -199,7 +207,7 @@ def create_dataloaders(
         n_q = sample_target.shape[1]
         # print(f"   • Detected n_q = {n_q} codebooks")
     except Exception as e:
-        print(f"    ⚠️ Could not auto-detect n_q: {e}. Using default n_q = 8")
+        print(f"    [!] Could not auto-detect n_q: {e}. Using default n_q = 8")
         n_q = 8
     
     # Training dataset configuration with detected n_q
@@ -229,7 +237,8 @@ def create_dataloaders(
         drop_last=True
     )
     
-    print(f"✅ Training dataset loaded:")
+    #print(f"[OK] Training dataset loaded:")
+    print(f"[OK!] Training dataset loaded:")
     print(f"    Split: {train_split}")
     print(f"    Size: {len(train_dataset)} sequences")
     print(f"    Batch size: {batch_size}")
@@ -242,12 +251,12 @@ def create_dataloaders(
         try:
             dataset_dict = load_from_disk(hf_dataset_path)
             if val_split not in dataset_dict:
-                print(f"⚠️ Warning: Validation split '{val_split}' not found in dataset.")
+                print(f"[!] Warning: Validation split '{val_split}' not found in dataset.")
                 print(f"   Available splits: {list(dataset_dict.keys())}")
                 print(f"   Continuing without validation.")
                 val_split = None
         except Exception as e:
-            print(f"⚠️ Warning: Could not check for validation split: {e}")
+            print(f"[!] Warning: Could not check for validation split: {e}")
             print(f"   Continuing without validation.")
             val_split = None
     
@@ -278,11 +287,11 @@ def create_dataloaders(
                 drop_last=True
             )
             
-            print(f"✅ Validation dataset loaded:")
+            print(f"[OK] Validation dataset loaded:")
             print(f"    Split: {val_split}")
             print(f"    Size: {len(val_dataset)} sequences")
         except Exception as e:
-            print(f"⚠️ Warning: Could not load validation split '{val_split}': {e}. Continuing without validation.")
+            print(f"[!] Warning: Could not load validation split '{val_split}': {e}. Continuing without validation.")
             val_loader = None
     
     return train_loader, val_loader, enc_model, n_q
@@ -352,7 +361,7 @@ def create_model(
     # Create model
     model = RNN(model_config, enc_model).to(device)
     
-    print(f"✅ Model created:")
+    print(f"[OK] Model created:")
     print(f"    Device: {device}")
     print(f"    Conditioning features: {conditioning_config['num_features']}")
     print(f"    Hidden size: {hidden_size}")
@@ -679,7 +688,7 @@ def train_model(
             start_epoch = checkpoint['epoch']
             print(f"📂 Resumed from checkpoint at epoch {start_epoch}\n")
         else:
-            print(f"⚠️  Checkpoint not found at {checkpoint_path}, starting fresh\n")
+            print(f"[!]  Checkpoint not found at {checkpoint_path}, starting fresh\n")
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "checkpoints").mkdir(exist_ok=True)
@@ -692,7 +701,7 @@ def train_model(
         shutil.copy2(conditioning_config_source, conditioning_config_dest)
         print(f"📋 Copied conditioning_config.json to model directory")
     else:
-        print(f"⚠️  Warning: conditioning_config.json not found at {conditioning_config_source}")
+        print(f"[!]  Warning: conditioning_config.json not found at {conditioning_config_source}")
     
     # Save standard configuration
     data_config = train_loader.dataset.config
@@ -792,7 +801,7 @@ def train_model(
     minutes, seconds = divmod(remainder, 60)
     
     print("\n" + "="*70)
-    print("✅ Training Completed")
+    print("[OK] Training Completed")
     print("="*70)
     print(f"Total time: {hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"Model saved to: {out_dir}")

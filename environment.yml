@@ -1,5 +1,6 @@
 name: rnencodec
 channels:
+  - pytorch          # Official PyTorch channel first for Windows compatibility
   - conda-forge
 channel_priority: strict
 dependencies:
@@ -17,7 +18,7 @@ dependencies:
   - ipywidgets
   - tensorboard
 
-  # Audio libs (no conda portaudio/sounddevice here)
+  # Audio libs
   - libsndfile
   - pysoundfile
   - ffmpeg
@@ -25,23 +26,31 @@ dependencies:
   - librosa
   - audioread
 
-  # Hugging Face
-  - transformers
-  - accelerate
-  - datasets
-  - tokenizers
+  # Hugging Face - updated versions for compatibility
+  - transformers>=4.35.0
+  - accelerate>=0.25.0
+  - datasets>=2.15.0
+  - tokenizers>=0.15.0
   - sentencepiece
-  - safetensors
-  - huggingface_hub
+  - safetensors>=0.4.0
+  - huggingface_hub>=0.20.0
+  - pyarrow>=14.0.0
 
-  # PyTorch trio (CPU builds from conda-forge)
-  - pytorch=2.5.*
-  - torchaudio=2.5.*
-  - torchvision=0.20.*
+  # PyTorch trio - from official pytorch channel with CPU-only builds
+  - pytorch::pytorch=2.5.*
+  - pytorch::torchaudio=2.5.*
+  - pytorch::torchvision=0.20.*
+  - pytorch::cpuonly
 
   # Your packages via pip
   - pip:
-      - soxr>=0.4.0   # pysoxr with ResampleStream
+      - soxr>=0.4.0
       - -e .
       - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
-      - sounddevice==0.5.2   # pip wheel bundles PortAudio; 24 kHz-friendly
+      - sounddevice==0.5.2
+
+# Environment variables to isolate from user site-packages
+variables:
+  PYTHONNOUSERSITE: "1"
+  PYTHONIOENCODING: UTF-8
+  LANG: en_US.UTF-8  
