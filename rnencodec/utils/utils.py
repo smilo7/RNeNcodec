@@ -204,86 +204,6 @@ def param_breakdown(model, trainable_only=True):
 ##################         DISPLAY utils        #################################
 ############################################################################################
 
-# import json
-# from pathlib import Path
-
-# def load_sidecar_normalized(
-#     basepath: str | Path,
-#     *,
-#     metapath: str | Path | None = None,
-#     dtype: torch.dtype = torch.float32,
-#     eps: float = 1e-8,
-# ) -> torch.Tensor:
-#     """
-#     Load a sidecar written by write_sidecar_features() and return
-#     a (T, D) torch.Tensor with per-feature normalization to [0,1].
-
-#     Parameters
-#     ----------
-#     basepath : str | Path
-#         Path WITHOUT extension, e.g.:
-#         'data/foo/bar' for files:
-#         'data/foo/bar.cond.npy' and 'data/foo/bar.cond.json'
-
-#     dtype : torch.dtype
-#         Output tensor dtype (default: float32)
-
-#     eps : float
-#         Small value to avoid division by zero if max == min
-
-#     Returns
-#     -------
-#     torch.Tensor
-#         Shape (T, D), normalized to [0,1] per feature
-#     """
-#     basepath = Path(basepath)
-
-#     # --- load raw data ---
-#     #arr = np.load(basepath.with_suffix(".cond.npy"))  # (T, D)
-#     cond_path = Path(f"{basepath}.cond.npy")  # Append instead of replace
-#     arr = np.load(cond_path)  # (T, D)
-#     if arr.ndim != 2:
-#         raise ValueError(f"{basepath}: expected 2D array, got shape {arr.shape}")
-
-#     # with open(basepath.with_suffix(".cond.json")) as f:
-#     #     meta = json.load(f)
-
-#     if metapath is None: 
-#         with open(Path(f"{basepath}.cond.json")) as f:
-#             meta = json.load(f)
-#     else:
-#         with open(metapath) as f:
-#              meta = json.load(f)
-
-#     # --- determine feature order ---
-#     if "names" in meta:
-#         names = meta["names"]
-#     elif "features" in meta:
-#         # fallback: stable order by insertion (Python 3.7+)
-#         names = list(meta["features"].keys())
-#     else:
-#         raise ValueError(f"{basepath}: no feature names found in metadata")
-
-#     if arr.shape[1] != len(names):
-#         raise ValueError(
-#             f"{basepath}: column mismatch: array has {arr.shape[1]} columns "
-#             f"but metadata lists {len(names)} features"
-#         )
-
-#     # --- normalize ---
-#     out = torch.from_numpy(arr).to(dtype=dtype)
-
-#     for i, name in enumerate(names):
-#         fmeta = meta["features"][name]
-#         fmin = float(fmeta.get("min", 0.0))
-#         fmax = float(fmeta.get("max", 1.0))
-
-#         out[:, i] = (out[:, i] - fmin) / max(fmax - fmin, eps)
-
-#     return out
-
-# ---------------------------------------------
-
 from pathlib import Path
 
 def load_sidecar(
@@ -425,99 +345,6 @@ def read_ecdc_reconstruct_audio(
 import numpy as np
 import matplotlib.pyplot as plt
 
-# def plot_audio_with_params_two_yaxes(
-#     trialaudio,
-#     whole_param_seq,
-#     audio_sr=24000,
-#     param_sr=75,
-#     param_names=None,
-#     figsize=(14, 4),
-#     audio_pad_frac=0.08,   # padding as fraction of audio peak-to-peak
-#     audio_pad_abs=1e-3,    # minimum absolute padding
-#     title="RNeNcodec parameter-driven synthesis",
-#     subtitle=""
-# ):
-#     color1 = '#AAAAAA'
-#     colors = ['#AA0022', 'tab:orange', 'tab:green', 'tab:purple', 'tab:brown',
-#               'tab:pink', 'tab:gray', 'tab:olive', 'tab:cyan']
-
-#     # Convert torch tensor if needed
-#     if hasattr(whole_param_seq, "detach"):
-#         whole_param_seq = whole_param_seq.detach().cpu().numpy()
-
-#     trialaudio = np.asarray(trialaudio).squeeze()
-#     whole_param_seq = np.asarray(whole_param_seq)
-
-#     N = trialaudio.shape[0]
-#     T, D = whole_param_seq.shape
-
-#     # Time axes
-#     t_audio = np.arange(N) / audio_sr
-#     t_param = np.arange(T) / param_sr
-
-#     fig, ax_audio = plt.subplots(figsize=figsize)
-
-#     # ---- Left axis: audio (autoscaled like a typical audio plot) ----
-#     ax_audio.plot(t_audio, trialaudio, color=color1, linewidth=0.6, alpha=0.85, label="audio")
-#     ax_audio.set_xlabel("Time (seconds)")
-#     ax_audio.set_ylabel("Audio amplitude")
-#     ax_audio.grid(True, alpha=0.25)
-
-#     # Choose y-limits based on actual audio range (with padding)
-#     a_min = float(np.min(trialaudio))
-#     a_max = float(np.max(trialaudio))
-#     a_rng = a_max - a_min
-
-#     pad = max(audio_pad_abs, audio_pad_frac * (a_rng if a_rng > 0 else 1.0))
-#     y0 = a_min - pad
-#     y1 = a_max + pad
-
-#     # If audio is essentially flat (edge case), use a small symmetric window
-#     if not np.isfinite(y0) or not np.isfinite(y1) or abs(y1 - y0) < 1e-6:
-#         y0, y1 = -0.1, 0.1
-
-#     ax_audio.set_ylim(y0, y1)
-
-#     # ---- Plot parameters mapped into the *audio* y-range ----
-#     # Map p in [0,1] -> y in [y0, y1] so params use the whole vertical span
-#     y_span = (y1 - y0)
-#     params_in_audio_units = y0 + whole_param_seq * y_span
-
-#     for d in range(D):
-#         c = colors[d % len(colors)]
-#         label = param_names[d] if (param_names is not None and d < len(param_names)) else f"param {d}"
-#         ax_audio.plot(
-#             t_param,
-#             params_in_audio_units[:, d],
-#             color=c,
-#             linewidth=2.0,
-#             alpha=0.95,
-#             label=label
-#         )
-
-#     # ---- Right axis: show [0,1] scale corresponding to left axis ----
-#     ax_param = ax_audio.twinx()
-#     ax_param.set_ylabel("Parameter value [0,1]")
-
-#     # Make right axis ticks correspond to [0,1] but placed in left-axis coords
-#     # Pick a nice set of ticks in parameter space
-#     p_ticks = np.linspace(0, 1, 6)  # 0.0, 0.2, ..., 1.0
-#     y_ticks = y0 + p_ticks * y_span
-
-#     ax_param.set_ylim(y0, y1)
-#     ax_param.set_yticks(y_ticks)
-#     ax_param.set_yticklabels([f"{p:.1f}" for p in p_ticks])
-
-#     # ---- Combined legend (all lines live on ax_audio now) ----
-#     ax_audio.legend(loc="upper right", frameon=False)
-
-#     if title is not None:
-#         ax_audio.set_title(title+ "\n" + subtitle)
-
-#     plt.tight_layout()
-#     plt.show()
-
-
 def plot_audio_with_params_two_yaxes(
     trialaudio,
     whole_param_seq,
@@ -652,4 +479,71 @@ def plot_audio(audio, sr=24000, channel=0, figsize=(14, 4), title="Audio Wavefor
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+# Create parameter contour with breakpoints for driving synthesis
+import torch
+
+def interpolate_breakpoints(breakpoints, frames_per_second):
+    """
+    Create interpolated tensor from breakpoint lists.
     
+    Args:
+        breakpoints: List of lists, each containing (time, value) tuples
+        frames_per_second: Number of frames per second
+    
+    Returns:
+        torch.Tensor of shape (T, D) where T=frames, D=num_parameters
+    """
+    # Validate inputs
+    if not breakpoints:
+        raise ValueError("breakpoints cannot be empty")
+    
+    D = len(breakpoints)  # Number of parameters
+    
+    # Check that all parameters have breakpoint at time=0
+    for i, param_breakpoints in enumerate(breakpoints):
+        if not param_breakpoints or param_breakpoints[0][0] != 0:
+            raise ValueError(f"Parameter {i} must have a breakpoint at time=0")
+    
+    # Find maximum time across all breakpoints
+    max_time = 0
+    for param_breakpoints in breakpoints:
+        for time, _ in param_breakpoints:
+            max_time = max(max_time, time)
+    
+    T = int(frames_per_second * max_time)
+    if T == 0:
+        T = 1  # At least one frame
+    
+    # Create time array for each frame
+    frame_times = torch.arange(T, dtype=torch.float32) / frames_per_second
+    
+    # Initialize result tensor
+    result = torch.zeros((T, D))
+    
+    # For each parameter
+    for param_idx, param_breakpoints in enumerate(breakpoints):
+        # Sort breakpoints by time
+        param_breakpoints = sorted(param_breakpoints, key=lambda x: x[0])
+        times = [t for t, v in param_breakpoints]
+        values = [v for t, v in param_breakpoints]
+        
+        # Manual linear interpolation
+        for frame_idx, frame_time in enumerate(frame_times):
+            # Find the right segment
+            if frame_time <= times[0]:
+                result[frame_idx, param_idx] = values[0]
+            elif frame_time >= times[-1]:
+                result[frame_idx, param_idx] = values[-1]
+            else:
+                # Find the two breakpoints to interpolate between
+                for i in range(len(times) - 1):
+                    if times[i] <= frame_time <= times[i + 1]:
+                        # Linear interpolation
+                        t0, t1 = times[i], times[i + 1]
+                        v0, v1 = values[i], values[i + 1]
+                        alpha = (frame_time - t0) / (t1 - t0)
+                        result[frame_idx, param_idx] = v0 + alpha * (v1 - v0)
+                        break
+    
+    return result
