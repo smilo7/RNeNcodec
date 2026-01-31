@@ -26,7 +26,7 @@ micromamba run -n rnencodec python -m ipykernel install --user \
   --name rnencodec --display-name "Python (rnencodec)"
 micromamba activate rnencodec   
 
-# (or, with conda)
+# (OR, with conda)
 # conda env create -f environment.yml
 # conda activate rnencodec
 # python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
@@ -63,7 +63,7 @@ This downloads the **water_fill user-formatted datset** from Hugging Face.
 CD to your datadir. Then:
 
 ```bash
-git clone https://huggingface.co/datasets/lonce/waterfill
+git clone https://huggingface.co/datasets/lonce/quickstart1
 ```
 
 - You are now ready to run the 1_dataset.ipynb to prepare the dataset for loading by RNeNcodec. 
