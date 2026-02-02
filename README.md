@@ -38,7 +38,7 @@ Conda/Mamba is strongly recommended because it installs both Python deps *and* n
 
 ```bash
 # system deps
-brew install ffmpeg libsndfile portaudio
+brew install ffmpeg libsndfile portaudio git-lfs
 
 # create a venv (from repo root)
 python3 -m venv .venv
@@ -83,6 +83,8 @@ This downloads the **water_fill user-formatted datset** from Hugging Face.
 CD to your datadir. Then:
 
 ```bash
+cd data/ # data/ is just the default location
+git lfs install --skip-repo
 git clone https://huggingface.co/datasets/lonce/quickstartdata
 ```
 
