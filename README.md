@@ -47,6 +47,7 @@ python -m pip install -U pip
 
 # python deps
 pip install -r requirements.txt
+pip install "rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4"
 pip install -e .
 
 # (optional) register kernel for Jupyter
