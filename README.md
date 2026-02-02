@@ -10,7 +10,7 @@ RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio gene
 ## 0) Requirements
 
 - Python ≥ 3.9
-- Conda/Mamba (recommended)
+- Conda (recommended)
 - Linux or macOS (Windows may work; real-time audio is easier on Linux/macOS)
 - For real-time audio: PortAudio runtime (Linux: `sudo apt-get install -y libportaudio2`)
 - Git (sudo apt-get install -y git) because you'll be installing a synth from a git repo
@@ -20,19 +20,14 @@ RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio gene
 ## 1) Create environment
 
 ```bash
-# from the repo root
-micromamba create -f environment.yml --no-rc -y  
-micromamba run -n rnencodec python -m ipykernel install --user \
-  --name rnencodec --display-name "Python (rnencodec)"
-micromamba activate rnencodec   
 
-# (OR, with conda)
-# conda env create -f environment.yml
-# conda activate rnencodec
-# python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
+conda config --set channel_priority strict
+conda env create -f environment.yml
+conda activate rnencodec
+python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
 ```
 
-#### plan B (to create environment only if you don't want to use Conda or Mamba)
+#### plan B (to create environment only if you don't use Conda)
 Conda/Mamba is strongly recommended because it installs both Python deps *and* native libraries reproducibly. If you can’t or don’t want to use conda/mamba, you can use pip + a system package manager instead.
 #### plan B example: macOS (Homebrew + venv)
 
@@ -66,6 +61,8 @@ micromamba install -y pytorch=2.5.* torchaudio=2.5.* torchvision=0.20.* pytorch-
 # OR what I need for my spanking new 5090 and sm_120 requirements: 
 # 1) Remove conda Torch packages (avoid mixing with pip wheels)
 micromamba remove -y pytorch torchaudio torchvision pytorch-cuda || true
+# or
+pip uninstall -y torch torchvision torchaudio
 
 # 2) Install pip CUDA 12.8 wheels (these support sm_120)
 python -m pip install --upgrade pip
