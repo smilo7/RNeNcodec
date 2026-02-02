@@ -32,6 +32,26 @@ micromamba activate rnencodec
 # python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
 ```
 
+#### plan B (to create environment only if you don't want to use Conda or Mamba)
+Conda/Mamba is strongly recommended because it installs both Python deps *and* native libraries reproducibly. If you can’t or don’t want to use conda/mamba, you can use pip + a system package manager instead.
+#### plan B example: macOS (Homebrew + venv)
+
+```bash
+# system deps
+brew install ffmpeg libsndfile portaudio
+
+# create a venv (from repo root)
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+
+# python deps
+pip install -r requirements.txt
+pip install -e .
+
+# (optional) register kernel for Jupyter
+python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
+```
 ---
 
 ## 2) GPU anyone?
@@ -63,7 +83,7 @@ This downloads the **water_fill user-formatted datset** from Hugging Face.
 CD to your datadir. Then:
 
 ```bash
-git clone https://huggingface.co/datasets/lonce/quickstart1
+git clone https://huggingface.co/datasets/lonce/quickstartdata
 ```
 
 - You are now ready to run the 1_dataset.ipynb to prepare the dataset for loading by RNeNcodec. 

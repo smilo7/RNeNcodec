@@ -1,0 +1,34 @@
+# Only for those choosing not to use Conda or Mamba (see README.txt)
+
+# Core numerical / ML
+numpy
+scipy
+torch
+torchaudio
+
+# Audio I/O & DSP
+soundfile          # pysoundfile
+audioread
+librosa
+soxr
+resampy
+
+# Data / utilities
+tqdm
+requests
+pyyaml
+packaging
+
+# Visualization / notebooks
+matplotlib
+tensorboard
+jupyterlab
+ipykernel
+ipywidgets
+
+# Hugging Face / datasets
+huggingface-hub
+datasets
+
+# Local package (installed editable in README)
+# pip install -e .
