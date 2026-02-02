@@ -11,6 +11,8 @@ dependencies:
   - scipy
   - matplotlib
   - seaborn
+  - git
+  - git-lfs
 
   # Jupyter
   - jupyterlab
@@ -26,7 +28,7 @@ dependencies:
   - librosa
   - audioread
 
-  # Hugging Face - updated versions for compatibility
+  # Hugging Face - updated versions for qcompatibility
   - transformers>=4.35.0
   - accelerate>=0.25.0
   - datasets>=2.15.0
