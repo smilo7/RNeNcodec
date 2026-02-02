@@ -1,0 +1,18 @@
+# PyTorch CPU (pip wheels; cross-platform)
+torch
+torchaudio
+torchvision
+
+# Audio python stack
+soundfile
+audioread
+librosa
+soxr
+resampy
+safetensors
+sounddevice==0.5.2
+
+# Hugging Face
+huggingface-hub
+datasets
+transformers

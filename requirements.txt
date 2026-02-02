@@ -1,13 +1,12 @@
-# Only for those choosing not to use Conda or Mamba (see README.txt)
-
 # Core numerical / ML
 numpy
 scipy
 torch
 torchaudio
+torchvision
 
 # Audio I/O & DSP
-soundfile          # pysoundfile
+soundfile
 audioread
 librosa
 soxr
@@ -18,6 +17,8 @@ tqdm
 requests
 pyyaml
 packaging
+safetensors
+sounddevice==0.5.2
 
 # Visualization / notebooks
 matplotlib
@@ -29,6 +30,4 @@ ipywidgets
 # Hugging Face / datasets
 huggingface-hub
 datasets
-
-# Local package (installed editable in README)
-# pip install -e .
+transformers

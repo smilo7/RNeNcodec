@@ -1,58 +1,41 @@
 name: rnencodec
 channels:
-  - pytorch          # Official PyTorch channel first for Windows compatibility
   - conda-forge
-channel_priority: strict
 dependencies:
-  # Core
   - python=3.11
   - pip
-  - numpy>=1.26
+
+  # Core scientific stack (compiled)
+  - numpy
   - scipy
   - matplotlib
-  - seaborn
-  - git
-  - git-lfs
 
-  # Jupyter
+  # Notebooks / UI (compiled bits + stable)
   - jupyterlab
   - ipykernel
   - ipywidgets
   - tensorboard
 
-  # Audio libs
-  - libsndfile
-  - pysoundfile
+  # Utilities + git
+  - tqdm
+  - requests
+  - pyyaml
+  - packaging
+  - git
+  - git-lfs
+
+  # Native audio dependencies (cross-platform via conda-forge)
   - ffmpeg
-  - soxr
-  - librosa
-  - audioread
+  - libsndfile
+  - portaudio
 
-  # Hugging Face - updated versions for qcompatibility
-  - transformers>=4.35.0
-  - accelerate>=0.25.0
-  - datasets>=2.15.0
-  - tokenizers>=0.15.0
-  - sentencepiece
-  - safetensors>=0.4.0
-  - huggingface_hub>=0.20.0
-  - pyarrow>=14.0.0
-
-  # PyTorch trio - from official pytorch channel with CPU-only builds
-  - pytorch::pytorch=2.5.*
-  - pytorch::torchaudio=2.5.*
-  - pytorch::torchvision=0.20.*
-  - pytorch::cpuonly
-
-  # Your packages via pip
   - pip:
-      - soxr>=0.4.0
+      # your package
       - -e .
+      # your git dependency
       - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
-      - sounddevice==0.5.2
+      # pip deps including torch (CPU by default)
+      - -r requirements-conda.txt
 
-# Environment variables to isolate from user site-packages
 variables:
   PYTHONNOUSERSITE: "1"
-  PYTHONIOENCODING: UTF-8
-  LANG: en_US.UTF-8  
