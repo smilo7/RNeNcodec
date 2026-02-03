@@ -21,9 +21,7 @@ RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio gene
 
 ```bash
 
-conda config --set channel_priority strict
-conda env create -f environment.yml
-conda activate rnencodec
+conda env create -f environment.yml conda activate rnencodec python -m pip install -r requirements-conda.txt python -m pip install -e .
 python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
 ```
 
@@ -50,6 +48,9 @@ python -m ipykernel install --user --name rnencodec --display-name "Python (rnen
 ```
 ---
 
+If you happen to like to run your jupyter notebooks from inside VSCode, then there is a ["renderer" extension from microsoft](https://marketplace.visualstudio.com/items?itemName=ms-toolsai.jupyter-renderers) that you might want so that you can render the interactive synth that appears in the inferencing notebooks): 
+
+---
 ## 2) GPU anyone?
 
 Inference works fine (better!) on CPU, but for training you might want to use a GPU if you have one available. Do whatever works for your card and cuda environment. For example:

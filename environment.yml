@@ -1,5 +1,6 @@
 name: rnencodec
 channels:
+  - pytorch
   - conda-forge
 dependencies:
   - python=3.11
@@ -8,10 +9,12 @@ dependencies:
   # Core scientific stack (compiled)
   - numpy
   - scipy
+  - pandas
   - matplotlib
 
-  # Notebooks / UI (compiled bits + stable)
+  # Notebooks / UI
   - jupyterlab
+  - ipython
   - ipykernel
   - ipywidgets
   - tensorboard
@@ -24,20 +27,29 @@ dependencies:
   - git
   - git-lfs
 
-  # Native audio dependencies (cross-platform via conda-forge)
+  # Native audio dependencies
   - ffmpeg
   - libsndfile
   - portaudio
 
-  - pip:
-      # your package
-      - -e .
-      # your git dependency
-      - rtpysynth[ui] @ git+https://github.com/lonce/RTPySynth@v0.1.4
-      # pip deps including torch (CPU by default)
-      - -r requirements-conda.txt
 
+  # Numpy-coupled compiled deps (keep in conda)
+  - numba
+  - llvmlite
+  - scikit-learn
+  - joblib
+  - msgpack-python
+  - pooch
+
+# PyTorch CPU via conda (stable on Windows)
+  - pytorch
+  - torchvision
+  - torchaudio
+  - cpuonly
+  
+  
 variables:
   PYTHONNOUSERSITE: "1"
-  PYTHONIOENCODING: UTF-8 
-  LANG: en_US.UTF-8
+  PYTHONIOENCODING: "utf-8"
+  PYTHONUTF8: "1"
+  LANG: "en_US.UTF-8"

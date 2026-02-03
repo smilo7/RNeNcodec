@@ -46,8 +46,7 @@ _PRINT_STATE = {"on": True, "stdout": None, "stderr": None,}
 
 import platform 
 # Detect OS and set num_workers 
-num_workers = 0 if platform.system in ("Windows", "Darwin") else 4 #windows and mac 
-
+num_workers = 0 if platform.system() in ("Windows", "Darwin") else 4 #windows and mac 
 
 def print_switch(on: bool | None = None):
     global _PRINT_STATE

@@ -10,6 +10,8 @@ old/
 artifacts/
 synth/
 
+**/output_*
+
 # Python build artifacts
 __pycache__/
 *.py[cod]
