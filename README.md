@@ -80,14 +80,12 @@ pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128
 
 Users are expected to have datasets of audio files, each with a corresponding .csv file that has parameters in columns (with parameter names as headers) at a sample rate of 75 frames per second (see 1_dataset.ipynb notebook for details). We assume this format is easy for users to create, and it is easily readable. It accommodates parameters that are dynamic  throughout a dataset sample, but also (with redundancy) static parameters. The 1_dataset.ipynb notebook then reads a dataset in this format to prepare it in a more efficient form that is ready for data loading by RNeNcodec. One such dataset already in the "user format" is **water_fill**. 
 
-This downloads the **water_fill user-formatted datset** from Hugging Face. 
-
-CD to your datadir. Then:
+This downloads the **water_fill user-formatted datset** from Hugging Face into the data/ directory. 
 
 ```bash
 cd data/ # data/ is just the default location
-git lfs install --skip-repo
-git clone https://huggingface.co/datasets/lonce/quickstartdata
+python -m pip install -U huggingface_hub
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='lonce/quickstartdata', repo_type='dataset', local_dir='quickstartdata')"
 ```
 
 - You are now ready to run the 1_dataset.ipynb to prepare the dataset for loading by RNeNcodec. 
