@@ -16,7 +16,7 @@ from typing import Dict, List, Tuple, Optional, Any
 from IPython.display import Audio, display
 
 from transformers import EncodecModel
-from rnencodec.generator import RNNGenerator, EncodecRTPlayer
+from rnencodec.generator import RNNGeneratorSoft, EncodecRTPlayer
 from rnencodec.model.gru_audio_model import GRUModelConfig
 from rnencodec.audioDataLoader.audio_dataset import LatentDatasetConfig
 
@@ -256,8 +256,11 @@ def load_model(
     override_cascade_mode: Optional[str] = None,
     override_temperature: Optional[float] = None,
     override_top_n: Optional[int] = None,
-    override_tau_soft: Optional[float] = None
-) -> Tuple[RNNGenerator, EncodecModel, Dict, GRUModelConfig]:
+    override_tau_soft: Optional[float] = None,
+    sample_mode: str = "sample",
+    top_k_outside: Optional[int] = None,
+    temperature_outside: float = 1.0
+) -> Tuple[RNNGeneratorSoft, EncodecModel, Dict, GRUModelConfig]:
     """
     Load trained RNN model and EnCodec model from checkpoint.
     
@@ -271,6 +274,9 @@ def load_model(
         override_temperature: Override temperature for hard cascade
         override_top_n: Override top-k for hard cascade
         override_tau_soft: Override tau for soft cascade
+        sample_mode: Sampling mode for soft cascade ("argmax", "gumbel", "sample")
+        top_k_outside: Top-k filtering for soft cascade sampling
+        temperature_outside: Temperature for soft cascade sampling
     
     Returns:
         Tuple of (rnn_generator, encodec_model, conditioning_config, model_config)
@@ -331,13 +337,16 @@ def load_model(
     
     # Create RNN generator
     print(f"Loading RNN model from {checkpoint_path.name}...")
-    rnngen = RNNGenerator.from_checkpoint(
+    rnngen = RNNGeneratorSoft.from_checkpoint(
         checkpoint_path,
         model_config,
         data_config,
         enc_model,
         chunksize,
-        hopsize
+        hopsize,
+        sample_mode_outside=sample_mode,
+        top_k_outside=top_k_outside,
+        temperature_outside=temperature_outside
     )
     
     print(f"Model loaded successfully!")
@@ -357,7 +366,7 @@ def load_model(
 
 
 def create_realtime_synth(
-    rnngen: RNNGenerator,
+    rnngen: RNNGeneratorSoft,
     conditioning_config: Dict,
     scaler: ParameterScaler,
     initial_values: Optional[Dict[str, float]] = None,
@@ -442,7 +451,7 @@ def create_realtime_synth(
 
 
 def generate_offline(
-    rnngen: RNNGenerator,
+    rnngen: RNNGeneratorSoft,
     conditioning_config: Dict,
     conditioning_sequence: Optional[torch.Tensor] = None,
     duration: float = 10.0,
@@ -526,6 +535,9 @@ def run_inference(
     temperature: Optional[float] = None,
     top_n: Optional[int] = None,
     tau_soft: Optional[float] = None,
+    sample_mode: str = "sample",
+    top_k_outside: Optional[int] = None,
+    temperature_outside: float = 1.0,
     initial_values: Optional[Dict[str, float]] = None,
     offline_duration: float = 10.0,
     offline_params: Optional[Dict[str, float]] = None,
@@ -551,6 +563,9 @@ def run_inference(
         temperature: Override temperature for hard cascade (only used if cascade_mode="hard")
         top_n: Override top-k for hard cascade (None = no restriction)
         tau_soft: Override tau for soft cascade (only used if cascade_mode="soft")
+        sample_mode: Sampling mode for soft cascade ("argmax", "gumbel", "sample") - default: "sample"
+        top_k_outside: Top-k filtering for soft cascade sampling (None = no restriction)
+        temperature_outside: Temperature for soft cascade sampling - default: 1.0
         initial_values: For realtime: dict of parameter_name -> initial_real_value
         offline_duration: For offline: duration in seconds
         offline_params: For offline: dict of parameter_name -> constant_real_value
@@ -586,15 +601,14 @@ def run_inference(
         )
     """
 
-
     if cascade_mode=="hard":
         if temperature is None:
             temperature=0.8
         if top_n is None:
-            top_n=10
+            top_n=8
     elif cascade_mode=="soft":
         if tau_soft is None:
-            tau_soft=0.6
+            tau_soft=0.8
     
     # Load model with optional overrides
     rnngen, enc_model, conditioning_config, model_config = load_model(
@@ -605,7 +619,10 @@ def run_inference(
         override_cascade_mode=cascade_mode,
         override_temperature=temperature,
         override_top_n=top_n,
-        override_tau_soft=tau_soft
+        override_tau_soft=tau_soft,
+        sample_mode=sample_mode,
+        top_k_outside=top_k_outside,
+        temperature_outside=temperature_outside
     )
     
     # Create parameter scaler
