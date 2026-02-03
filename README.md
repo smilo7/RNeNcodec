@@ -21,7 +21,10 @@ RNeNcodec is a lightweight RNN over Encodec tokens for real-time(ish) audio gene
 
 ```bash
 
-conda env create -f environment.yml conda activate rnencodec python -m pip install -r requirements-conda.txt python -m pip install -e .
+conda env create -f environment.yml 
+conda activate rnencodec 
+python -m pip install -r requirements-conda.txt 
+python -m pip install -e .
 python -m ipykernel install --user --name rnencodec --display-name "Python (rnencodec)"
 ```
 
