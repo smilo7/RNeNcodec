@@ -18,7 +18,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Union
 
 import torch
 import torch.nn as nn
@@ -138,8 +138,8 @@ def create_dataloaders(
     conditioning_config: Dict,
     sequence_length: int = 125,
     batch_size: int = 100,
-    train_split: str = 'train',
-    val_split: Optional[str] = 'validation',
+    train_splits: Optional[Union[str, List[str]]] = None,
+    val_splits: Optional[Union[str, List[str]]] = None,
     num_workers: int = num_workers,
     add_noise: bool = True,
     noise_weight: float = 0.05,
@@ -150,14 +150,17 @@ def create_dataloaders(
     """
     Create training and validation data loaders.
     Auto-detects n_q (number of codebooks) from the dataset.
+    Supports multiple splits for both training and validation.
     
     Args:
         dataset_path: Path to dataset root
         conditioning_config: Conditioning configuration from load_dataset_config()
         sequence_length: Length of training sequences (frames)
         batch_size: Batch size for training
-        train_split: Name of training split
-        val_split: Name of validation split (None to skip validation)
+        train_splits: List of split names to use for training (e.g., ['train'] or ['train', 'test'])
+                     Can also be a single string. None defaults to ['train'].
+        val_splits: List of split names to use for validation (e.g., ['validation'])
+                   Can also be a single string. None means no validation.
         num_workers: Number of data loading workers
         add_noise: Whether to add noise during training
         noise_weight: Noise weight for augmentation
@@ -167,10 +170,19 @@ def create_dataloaders(
         
     Returns:
         Tuple of (train_loader, val_loader, enc_model, n_q). 
-        val_loader is None if val_split is None. n_q is detected from data.
+        val_loader is None if val_splits is None. n_q is detected from data.
     """
     dataset_path = Path(dataset_path)
     hf_dataset_path = str(dataset_path / 'hf_dataset')
+    
+    # Normalize split inputs to lists
+    if train_splits is None:
+        train_splits = ['train']
+    elif isinstance(train_splits, str):
+        train_splits = [train_splits]
+    
+    if val_splits is not None and isinstance(val_splits, str):
+        val_splits = [val_splits]
     
     # Create parameter specs dictionary from conditioning config
     props = {name: None for name in conditioning_config['feature_names']}
@@ -179,8 +191,24 @@ def create_dataloaders(
     enc_model = EncodecModel.from_pretrained("facebook/encodec_24khz")
     enc_model.eval()
     
+    # Verify that requested splits exist
+    from datasets import load_from_disk
+    dataset_dict = load_from_disk(hf_dataset_path)
+    available_splits = list(dataset_dict.keys())
+    
+    # Check training splits
+    for split in train_splits:
+        if split not in available_splits:
+            raise ValueError(f"Training split '{split}' not found. Available splits: {available_splits}")
+    
+    # Check validation splits
+    if val_splits:
+        for split in val_splits:
+            if split not in available_splits:
+                raise ValueError(f"Validation split '{split}' not found. Available splits: {available_splits}")
+    
     # Create a temporary dataset to detect n_q from the first sample
-    # print("🔍 Detecting n_q (number of codebooks) from dataset...")
+    # Use first training split for detection
     temp_config = LatentDatasetConfig(
         dataset_path=hf_dataset_path,
         sequence_length=sequence_length,
@@ -196,7 +224,7 @@ def create_dataloaders(
         cond_suffix=".cond.npy",
         strict=False
     )
-    temp_dataset = EnCodecLatentDataset_dynamic(temp_config, "facebook/encodec_24khz", split=train_split)
+    temp_dataset = EnCodecLatentDataset_dynamic(temp_config, "facebook/encodec_24khz", split=train_splits[0])
     
     # Get first sample to detect n_q
     try:
@@ -209,25 +237,35 @@ def create_dataloaders(
         print(f"    [!] Could not auto-detect n_q: {e}. Using default n_q = 8")
         n_q = 8
     
-    # Training dataset configuration with detected n_q
-    train_config = LatentDatasetConfig(
-        dataset_path=hf_dataset_path,
-        sequence_length=sequence_length,
-        parameter_specs=props,
-        add_noise=add_noise,
-        noise_weight=noise_weight,
-        codebook_size=codebook_size,
-        n_q=n_q,
-        clamp_val=clamp_val,
-        filters={},
-        files_per_sequence=files_per_sequence,
-        cond_root=None,  # Co-located sidecars
-        cond_suffix=".cond.npy",
-        strict=False
-    )
+    # Create training datasets from all requested splits and concatenate them
+    train_datasets = []
+    for split in train_splits:
+        train_config = LatentDatasetConfig(
+            dataset_path=hf_dataset_path,
+            sequence_length=sequence_length,
+            parameter_specs=props,
+            add_noise=add_noise,
+            noise_weight=noise_weight,
+            codebook_size=codebook_size,
+            n_q=n_q,
+            clamp_val=clamp_val,
+            filters={},
+            files_per_sequence=files_per_sequence,
+            cond_root=None,  # Co-located sidecars
+            cond_suffix=".cond.npy",
+            strict=False
+        )
+        dataset = EnCodecLatentDataset_dynamic(train_config, "facebook/encodec_24khz", split=split)
+        train_datasets.append(dataset)
     
-    # Create training dataset and loader
-    train_dataset = EnCodecLatentDataset_dynamic(train_config, "facebook/encodec_24khz", split=train_split)
+    # Concatenate all training datasets
+    from torch.utils.data import ConcatDataset
+    if len(train_datasets) == 1:
+        train_dataset = train_datasets[0]
+    else:
+        train_dataset = ConcatDataset(train_datasets)
+    
+    # Create training loader
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -236,62 +274,54 @@ def create_dataloaders(
         drop_last=True
     )
     
-    #print(f"[OK] Training dataset loaded:")
     print(f"[OK!] Training dataset loaded:")
-    print(f"    Split: {train_split}")
+    print(f"    Splits: {', '.join(train_splits)}")
     print(f"    Size: {len(train_dataset)} sequences")
     print(f"    Batch size: {batch_size}")
     
     # Create validation dataset and loader if requested
     val_loader = None
-    if val_split:
-        # Check if validation split actually exists
-        from datasets import load_from_disk
-        try:
-            dataset_dict = load_from_disk(hf_dataset_path)
-            if val_split not in dataset_dict:
-                print(f"[!] Warning: Validation split '{val_split}' not found in dataset.")
-                print(f"   Available splits: {list(dataset_dict.keys())}")
-                print(f"   Continuing without validation.")
-                val_split = None
-        except Exception as e:
-            print(f"[!] Warning: Could not check for validation split: {e}")
-            print(f"   Continuing without validation.")
-            val_split = None
-    
-    if val_split:
-        val_config = LatentDatasetConfig(
-            dataset_path=hf_dataset_path,
-            sequence_length=sequence_length,
-            parameter_specs=props,
-            add_noise=False,  # No noise for validation
-            noise_weight=noise_weight,
-            codebook_size=codebook_size,
-            n_q=n_q,
-            clamp_val=clamp_val,
-            filters={},
-            files_per_sequence=files_per_sequence,
-            cond_root=None,
-            cond_suffix=".cond.npy",
-            strict=False
+    if val_splits:
+        # Create validation datasets from all requested splits and concatenate them
+        val_datasets = []
+        for split in val_splits:
+            val_config = LatentDatasetConfig(
+                dataset_path=hf_dataset_path,
+                sequence_length=sequence_length,
+                parameter_specs=props,
+                add_noise=False,  # No noise for validation
+                noise_weight=0.0,
+                codebook_size=codebook_size,
+                n_q=n_q,
+                clamp_val=clamp_val,
+                filters={},
+                files_per_sequence=files_per_sequence,
+                cond_root=None,
+                cond_suffix=".cond.npy",
+                strict=False
+            )
+            dataset = EnCodecLatentDataset_dynamic(val_config, "facebook/encodec_24khz", split=split)
+            val_datasets.append(dataset)
+        
+        # Concatenate all validation datasets
+        if len(val_datasets) == 1:
+            val_dataset = val_datasets[0]
+        else:
+            val_dataset = ConcatDataset(val_datasets)
+        
+        # Create validation loader
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,  # Don't shuffle validation
+            num_workers=num_workers,
+            drop_last=False
         )
         
-        try:
-            val_dataset = EnCodecLatentDataset_dynamic(val_config, "facebook/encodec_24khz", split=val_split)
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=1,
-                shuffle=True,
-                num_workers=num_workers,
-                drop_last=True
-            )
-            
-            print(f"[OK] Validation dataset loaded:")
-            print(f"    Split: {val_split}")
-            print(f"    Size: {len(val_dataset)} sequences")
-        except Exception as e:
-            print(f"[!] Warning: Could not load validation split '{val_split}': {e}. Continuing without validation.")
-            val_loader = None
+        print(f"[OK!] Validation dataset loaded:")
+        print(f"    Splits: {', '.join(val_splits)}")
+        print(f"    Size: {len(val_dataset)} sequences")
+        print(f"    Batch size: {batch_size}")
     
     return train_loader, val_loader, enc_model, n_q
 
@@ -360,7 +390,7 @@ def create_model(
     # Create model
     model = RNN(model_config, enc_model).to(device)
     
-    print(f"[OK] Model created:")
+    print(f"🧠 Model created:")
     print(f"    Device: {device}")
     print(f"    Conditioning features: {conditioning_config['num_features']}")
     print(f"    Hidden size: {hidden_size}")
@@ -414,7 +444,8 @@ def train_epoch(
     criterion,
     device,
     params: Dict,
-    epoch: int
+    epoch: int,
+    use_tqdm: bool = True
 ) -> Dict[str, float]:
     """
     Train for one epoch.
@@ -427,6 +458,7 @@ def train_epoch(
         device: Device to train on
         params: Training parameters dictionary
         epoch: Current epoch number
+        use_tqdm: Whether to show progress bar
         
     Returns:
         Dictionary with loss statistics
@@ -452,8 +484,23 @@ def train_epoch(
     epoch_quantizer_losses = [0.0] * n_q
     num_batches = 0
     
-    for batch_num, (inp, target) in enumerate(train_loader):
+    # Setup iterator with optional progress bar
+    total_batches = min(batches_per_epoch, len(train_loader))
+    iterator = iter(train_loader)
+    
+    if use_tqdm:
+        from tqdm import tqdm
+        pbar = tqdm(range(total_batches), desc=f"Epoch {epoch+1}", leave=False)
+    else:
+        pbar = range(total_batches)
+    
+    for batch_num in pbar:
         if batch_num >= batches_per_epoch:
+            break
+        
+        try:
+            inp, target = next(iterator)
+        except StopIteration:
             break
             
         inp, target = inp.to(device), target.to(device)
@@ -504,6 +551,10 @@ def train_epoch(
         for j in range(n_q):
             epoch_quantizer_losses[j] += batch_quantizer_losses[j]
         num_batches += 1
+        
+        # Update progress bar
+        if use_tqdm:
+            pbar.set_postfix({'loss': f'{batch_loss.item():.4f}', 'tf': use_tf})
     
     # Average over batches
     avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
@@ -513,6 +564,115 @@ def train_epoch(
         'loss': avg_loss,
         'quantizer_losses': avg_quantizer_losses,
         'teacher_forcing': use_tf
+    }
+
+
+def validate_epoch(
+    model: RNN,
+    val_loader: DataLoader,
+    quantizer_weights: Optional[List[float]],
+    n_q: int,
+    batches_per_epoch: Optional[int] = None,
+    device: Optional[torch.device] = None,
+    use_tqdm: bool = True
+) -> Dict:
+    """
+    Run one validation epoch (no gradient computation).
+    
+    Args:
+        model: The RNN model
+        val_loader: Validation data loader
+        quantizer_weights: Per-codebook loss weights (None for equal weighting)
+        n_q: Number of codebooks
+        batches_per_epoch: Optional limit on number of batches (None = full epoch)
+        device: Device to run on
+        use_tqdm: Whether to show progress bar
+        
+    Returns:
+        Dictionary with validation metrics
+    """
+    if device is None:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    
+    model.eval()  # Set to evaluation mode
+    
+    # Initialize metrics
+    epoch_loss = 0.0
+    epoch_quantizer_losses = [0.0] * n_q
+    num_batches = 0
+    
+    # Use same loss criterion as training
+    criterion = nn.CrossEntropyLoss(reduction='mean')
+    
+    # Setup iterator
+    iterator = iter(val_loader)
+    total_batches = batches_per_epoch if batches_per_epoch else len(val_loader)
+    
+    if use_tqdm:
+        from tqdm import tqdm
+        pbar = tqdm(range(total_batches), desc="Validation", leave=False)
+    else:
+        pbar = range(total_batches)
+    
+    with torch.no_grad():  # No gradients during validation
+        for batch_idx in pbar:
+            try:
+                inp, target = next(iterator)
+            except StopIteration:
+                break
+            
+            # Move to device
+            inp, target = inp.to(device), target.to(device)
+            B, T, n_q_actual = target.shape
+            
+            # Initialize hidden state
+            hidden = model.init_hidden(B)
+            
+            # Forward pass through sequence
+            batch_quantizer_losses = [0.0] * n_q
+            for i in range(T):
+                # Always use teacher forcing for validation
+                tflatents = prepare_target_codebook_latents(model, target[:, i, :])
+                
+                # Forward pass
+                logits_list, hidden, sampled_indices, step_latent = model(
+                    inp[:, i, :],
+                    hidden,
+                    target_codebook_latents=tflatents,
+                    use_teacher_forcing=True,
+                    return_step_latent=False
+                )
+                
+                # Compute loss per quantizer
+                for j in range(n_q):
+                    quantizer_loss = criterion(logits_list[j], target[:, i, j])
+                    batch_quantizer_losses[j] += quantizer_loss.item()
+            
+            # Average over time and apply quantizer weights
+            batch_quantizer_losses = [ql / T for ql in batch_quantizer_losses]
+            
+            if quantizer_weights is not None:
+                batch_loss = sum(w * ql for w, ql in zip(quantizer_weights, batch_quantizer_losses))
+            else:
+                batch_loss = sum(batch_quantizer_losses) / n_q
+            
+            # Accumulate
+            epoch_loss += batch_loss
+            for j in range(n_q):
+                epoch_quantizer_losses[j] += batch_quantizer_losses[j]
+            num_batches += 1
+            
+            # Update progress bar
+            if use_tqdm:
+                pbar.set_postfix({'val_loss': f'{batch_loss:.4f}'})
+    
+    # Average over batches
+    avg_loss = epoch_loss / num_batches if num_batches > 0 else 0.0
+    avg_quantizer_losses = [ql / num_batches for ql in epoch_quantizer_losses]
+    
+    return {
+        'loss': avg_loss,
+        'quantizer_losses': avg_quantizer_losses
     }
 
 
@@ -538,6 +698,15 @@ def train_model(
     save_interval: int = 25,
     resume_checkpoint: Optional[str] = None,
     device: Optional[torch.device] = None,
+    # New parameters
+    train_splits: Optional[Union[str, List[str]]] = None,
+    val_splits: Optional[Union[str, List[str]]] = None,
+    TF_schedule: Optional[List[int]] = None,
+    quantizer_weights: Optional[List[float]] = None,
+    simulate_parallel: bool = False,
+    use_tensorboard: bool = True,
+    use_tqdm: bool = True,
+    val_interval: int = 1,
     **kwargs
 ) -> Dict:
     """
@@ -563,6 +732,14 @@ def train_model(
         save_interval: Save checkpoint every N epochs
         resume_checkpoint: Path to checkpoint to resume from
         device: Device to train on (None for auto)
+        train_splits: Training split(s) - single string or list of strings (default: auto-detect)
+        val_splits: Validation split(s) - single string or list of strings (default: auto-detect)
+        TF_schedule: Teacher forcing schedule [epochs_on, epochs_off] (default: [25, 25])
+        quantizer_weights: Per-codebook loss weights (default: [3.0, 2.0, 1.5, 1.0, ...])
+        simulate_parallel: If True, always use teacher forcing (parallel training)
+        use_tensorboard: If True, log to TensorBoard
+        use_tqdm: If True, show progress bars
+        val_interval: Run validation every N epochs (default: 1 = every epoch)
         **kwargs: Additional parameters (noise_weight, dropout, add_noise, etc.)
         
     Returns:
@@ -595,9 +772,7 @@ def train_model(
     save_dir   = p.parent
     model_name = p.name
 
-    # print("\n" + "="*70)
     print("\n\033[1m🚀 Training Configurations\033[0m\n")
-    # print("="*70 + "\n")
     
     # Setup device
     if device is None:
@@ -613,14 +788,18 @@ def train_model(
     # print("🔍 Detecting available splits...")
     available_splits = get_available_splits(dataset_path)
     
-    # Determine which splits to use
-    train_split = 'train' if 'train' in available_splits else available_splits[0]
+    # Determine which splits to use (allow user override)
+    if train_splits is None:
+        train_splits = 'train' if 'train' in available_splits else available_splits[0]
     
-    # Use validation or test split if available (prefer validation)
-    val_split = None
-    if 'validation' in available_splits:
-        val_split = 'validation'
-    elif 'test' in available_splits:
+    if val_splits is None:
+        # Use validation or test split if available (prefer validation)
+        if 'validation' in available_splits:
+            val_splits = 'validation'
+        elif 'test' in available_splits:
+            val_splits = 'test'
+        else:
+            val_splits = None
         val_split = 'test'
     
     # print(f"   • Using train split: '{train_split}'")
@@ -638,8 +817,8 @@ def train_model(
         conditioning_config=conditioning_config,
         sequence_length=sequence_length,
         batch_size=batch_size,
-        train_split=train_split,
-        val_split=val_split,
+        train_splits=train_splits,
+        val_splits=val_splits,
         add_noise=kwargs.get('add_noise', True),
         noise_weight=kwargs.get('noise_weight', 0.05),
         files_per_sequence=kwargs.get('files_per_sequence', 4)
@@ -720,18 +899,29 @@ def train_model(
     print(f"💾 Output directory: {out_dir}")
     print(f"💾 Saved configuration to: {out_dir / 'config_v2.pt'}")
     
-    # Setup tensorboard
-    writer = SummaryWriter(log_dir=str(out_dir / "tensorboard"))
+    # Setup tensorboard (optional)
+    writer = None
+    if use_tensorboard:
+        writer = SummaryWriter(log_dir=str(out_dir / "tensorboard"))
     
-    # Training parameters (removed runtime sampling params - now in model config)
+    # Use provided TF_schedule or default
+    if TF_schedule is None:
+        TF_schedule = [25, 25]
+    
+    # Use provided quantizer_weights or default
+    if quantizer_weights is None:
+        quantizer_weights = [3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.5, 0.4]
+    
+    # Training parameters
     params = {
         'batch_size': batch_size,
         'sequence_length': sequence_length,
         'n_q': n_q,
         'batches_per_epoch': batches_per_epoch,
         'input_size': 128,
-        'TF_schedule': kwargs.get('TF_schedule', [25, 25]),
-        'simulate_parallel': kwargs.get('simulate_parallel', False)
+        'TF_schedule': TF_schedule,
+        'simulate_parallel': simulate_parallel,
+        'quantizer_weights': quantizer_weights
     }
     
     # Training loop
@@ -741,7 +931,20 @@ def train_model(
     print(f"Epochs: {start_epoch + 1} → {start_epoch + num_epochs}")
     print(f"Batches per epoch: {batches_per_epoch}")
     print(f"Batch size: {batch_size}")
-    print("="*70 + "\n")
+    print(f"TF schedule: {TF_schedule}")
+    print(f"Simulate parallel: {simulate_parallel}")
+    if val_loader:
+        print(f"Validation: Enabled ({len(val_loader)} batches, every {val_interval} epoch(s))")
+    else:
+        print(f"Validation: Disabled")
+    
+    # TensorBoard instructions
+    if use_tensorboard:
+        # print(f"    Log directory: {out_dir / 'tensorboard'}")
+        print(f"Tensorboard: Enabled")
+        print(f"    run in a new terminal: \033[1mtensorboard --logdir={out_dir / 'tensorboard'}\033[0m")
+    
+    print("="*70)
     
     start_time = time.time()
     
@@ -754,17 +957,40 @@ def train_model(
             criterion=criterion,
             device=device,
             params=params,
-            epoch=epoch
+            epoch=epoch,
+            use_tqdm=use_tqdm
         )
+        
+        # Validation (if validation data available and at the right interval)
+        val_stats = None
+        if val_loader is not None and (epoch + 1) % val_interval == 0:
+            val_stats = validate_epoch(
+                model=model,
+                val_loader=val_loader,
+                quantizer_weights=quantizer_weights,
+                n_q=n_q,
+                batches_per_epoch=batches_per_epoch,
+                device=device,
+                use_tqdm=use_tqdm
+            )
         
         # Print progress
         tf_status = "TF=ON" if stats['teacher_forcing'] else "TF=OFF"
-        print(f"Epoch {epoch+1:3d}/{start_epoch + num_epochs} | Loss: {stats['loss']:.4f} | {tf_status}")
+        if val_stats:
+            print(f"Epoch {epoch+1:3d}/{start_epoch + num_epochs} | {tf_status} | Training loss: {stats['loss']:.4f} | Validation loss: {val_stats['loss']:.4f}")
+        else:
+            print(f"Epoch {epoch+1:3d}/{start_epoch + num_epochs} | {tf_status} | Training loss: {stats['loss']:.4f}")
         
         # Log to tensorboard
-        writer.add_scalar("Loss/train", stats['loss'], epoch + 1)
-        for j, ql in enumerate(stats['quantizer_losses']):
-            writer.add_scalar(f"Loss/quantizer_{j}", ql, epoch + 1)
+        if writer:
+            writer.add_scalar("Loss/train", stats['loss'], epoch + 1)
+            if val_stats:
+                writer.add_scalar("Loss/val", val_stats['loss'], epoch + 1)
+            for j, ql in enumerate(stats['quantizer_losses']):
+                writer.add_scalar(f"Loss/train_quantizer_{j}", ql, epoch + 1)
+            if val_stats:
+                for j, ql in enumerate(val_stats['quantizer_losses']):
+                    writer.add_scalar(f"Loss/val_quantizer_{j}", ql, epoch + 1)
         
         # Save checkpoint
         if (epoch + 1) % save_interval == 0:
@@ -793,15 +1019,14 @@ def train_model(
     last_path = out_dir / "checkpoints" / "last_checkpoint.pt"
     shutil.copy2(final_path, last_path)
     
-    writer.close()
+    if writer:
+        writer.close()
     
     elapsed = time.time() - start_time
     hours, remainder = divmod(int(elapsed), 3600)
     minutes, seconds = divmod(remainder, 60)
     
-    print("\n" + "="*70)
-    print("[OK] Training Completed")
-    print("="*70)
+    print("\n\033[1m🏋️ Training Completed\033[0m\n")
     print(f"Total time: {hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"Model saved to: {out_dir}")
     print("="*70 + "\n")
