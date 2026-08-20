@@ -54,7 +54,8 @@ echo "Output:  $OUT"
 # Fail fast and legibly if the env lacks something, rather than dying deep inside
 # the training loop after the scheduler has already spent its queue wait.
 python - <<'PY'
-import importlib, sys
+import importlib.util, sys   # NOT `import importlib`: util is a submodule and is
+                             # not imported as a side effect of importing the package
 missing = [m for m in ("torch", "transformers", "datasets", "soundfile", "numpy")
            if not importlib.util.find_spec(m)]
 if missing:
