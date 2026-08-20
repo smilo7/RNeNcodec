@@ -40,3 +40,7 @@ Thumbs.db
 # Logs
 *.log
 synth/
+
+# Local virtualenvs (uv/venv write a self-ignore, but not every tool does)
+.venv/
+venv/
