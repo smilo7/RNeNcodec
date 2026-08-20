@@ -216,7 +216,13 @@ def create_dataloaders(
         add_noise=False,
         noise_weight=0.0,
         codebook_size=codebook_size,
-        n_q=8,  # Temporary placeholder
+        # UPPER BOUND, not a guess. The dataset slices codes to config.n_q
+        # (`codes[:, :self.n_q, ...]`), so detection below reads back whatever is
+        # put here whenever the data has at least that many codebooks. With the
+        # old placeholder of 8, a 16-codebook dataset (EnCodec 24 kHz at 12 kbps)
+        # was silently trained as 8 and the mismatch never surfaced. 32 is the
+        # most EnCodec 24 kHz can emit (24 kbps), so slicing to it never truncates.
+        n_q=32,
         clamp_val=clamp_val,
         filters={},
         files_per_sequence=1,

@@ -43,6 +43,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+def _detect_n_q(dataset_root: Path) -> int:
+    """Codebooks in the corpus, read from the data rather than from a placeholder.
+
+    Loads one sample with a slice width of 32 -- the most EnCodec 24 kHz can emit
+    -- so the slice never truncates and the returned width is the true n_q.
+    """
+    from rnencodec.audioDataLoader.audio_dataset import (
+        EnCodecLatentDataset_dynamic, LatentDatasetConfig,
+    )
+    import json
+    cc = json.loads((dataset_root / "hf_dataset" / "conditioning_config.json").read_text())
+    cfg = LatentDatasetConfig(
+        dataset_path=str(dataset_root / "hf_dataset"),
+        sequence_length=8,
+        parameter_specs={n: None for n in cc["feature_names"]},
+        add_noise=False, noise_weight=0.0, codebook_size=1024,
+        n_q=32, clamp_val=15, filters={}, files_per_sequence=1,
+        cond_root=None, cond_suffix=".cond.npy", strict=False,
+    )
+    ds = EnCodecLatentDataset_dynamic(cfg, "facebook/encodec_24khz", split="train")
+    _, target = ds[0]
+    return int(target.shape[1])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -60,6 +84,9 @@ def main():
     ap.add_argument("--lr", type=float, default=0.005)
     ap.add_argument("--tau-soft", type=float, default=0.6)
     ap.add_argument("--resume", default=None, help="Previous run dir to resume from")
+    ap.add_argument("--expect-n-q", type=int, default=16,
+                    help="Fail unless the dataset really has this many codebooks "
+                         "(0 disables). Guards the whole point of this run.")
     args = ap.parse_args()
 
     ds = Path(args.dataset)
@@ -73,6 +100,22 @@ def main():
 
     import torch
     from training.loop import train_model
+
+    # Verify the codebook count BEFORE training, because getting it wrong is
+    # silent. `train_model` derives n_q by slicing a sample to a placeholder and
+    # reading the shape back, so a too-small placeholder simply reports itself --
+    # which is how a 16-codebook corpus was trained as 8 without any warning.
+    # A whole run at the wrong n_q is unusable for the enhancer, so check first.
+    if args.expect_n_q:
+        n_q = _detect_n_q(ds)
+        if n_q != args.expect_n_q:
+            raise SystemExit(
+                f"dataset has n_q={n_q}, expected {args.expect_n_q}.\n"
+                f"The BWE enhancer models require 16 (EnCodec 24 kHz @ 12 kbps). "
+                f"Re-run the dataprep with quick_encode(..., bandwidth=12.0), or "
+                f"pass --expect-n-q {n_q} if you really mean to train at this rate."
+            )
+        print(f"codebooks: {n_q} (as expected)", flush=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpu = f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
