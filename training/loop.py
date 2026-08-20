@@ -481,9 +481,14 @@ def train_epoch(
     TF_cycle = params['TF_schedule'][0] + params['TF_schedule'][1]
     use_tf = (epoch % TF_cycle) < params['TF_schedule'][0]
     
-    # Quantizer weights
-    raw_weights = torch.tensor([1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3], dtype=torch.float)
-    quantizer_weights = (raw_weights * (len(raw_weights) / raw_weights.sum()))[:n_q].to(device)
+    # Quantizer weights: a descending ramp so earlier codebooks dominate the loss.
+    # Built to length n_q rather than hardcoded to 8 -- the old literal
+    # [1.0, 0.9, ... 0.3] was sliced with [:n_q], which silently yielded only 8
+    # weights for a 16-codebook model and then raised IndexError on codebook 8.
+    # torch.linspace(1.0, 0.3, 8) reproduces that literal exactly, so n_q=8 runs
+    # are bit-identical to before.
+    raw_weights = torch.linspace(1.0, 0.3, n_q, dtype=torch.float)
+    quantizer_weights = (raw_weights * (len(raw_weights) / raw_weights.sum())).to(device)
     
     # Tracking
     epoch_loss = 0.0
@@ -914,9 +919,21 @@ def train_model(
     if TF_schedule is None:
         TF_schedule = [25, 25]
     
-    # Use provided quantizer_weights or default
+    # Use provided quantizer_weights or default.
+    # Also sized to n_q: validate_epoch zips these against the per-codebook losses,
+    # and zip() truncates silently, so a fixed 8-entry list meant a 16-codebook
+    # model was validated on its first 8 codebooks only -- no error, just a
+    # quietly wrong validation loss. The literal below is reproduced exactly when
+    # n_q == 8.
     if quantizer_weights is None:
-        quantizer_weights = [3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.5, 0.4]
+        base = [3.0, 2.0, 1.5, 1.0, 0.8, 0.6, 0.5, 0.4]
+        if n_q <= len(base):
+            quantizer_weights = base[:n_q]
+        else:
+            # Extend the same decaying shape to n_q by interpolating the base curve.
+            import numpy as _np
+            xs = _np.linspace(0, len(base) - 1, n_q)
+            quantizer_weights = _np.interp(xs, _np.arange(len(base)), base).tolist()
     
     # Training parameters
     params = {
