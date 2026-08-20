@@ -61,7 +61,10 @@ echo "Output:  $OUT"
 python - <<'PY'
 import importlib.util, sys   # NOT `import importlib`: util is a submodule and is
                              # not imported as a side effect of importing the package
-missing = [m for m in ("torch", "transformers", "datasets", "soundfile", "numpy")
+# Must match what an actual training run imports. librosa in particular is
+# reached transitively: rnencodec/__init__.py -> generator -> librosa.
+missing = [m for m in ("torch", "transformers", "datasets", "soundfile", "numpy",
+                       "scipy", "librosa", "soxr", "resampy", "tensorboard")
            if not importlib.util.find_spec(m)]
 if missing:
     sys.exit(f"missing packages in this env: {', '.join(missing)}")

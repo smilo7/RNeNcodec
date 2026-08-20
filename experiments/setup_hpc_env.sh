@@ -46,22 +46,39 @@ fi
 
 conda activate "$NEW_ENV"
 
-# --no-deps is NOT used here: datasets legitimately needs pyarrow/dill/xxhash/
-# multiprocess/fsspec, which are pure-Python or self-contained wheels. torch is
-# already satisfied in the clone, so pip will not try to touch it. Pinning below
-# torch's requirement is unnecessary; just do not let anything upgrade torch.
-echo "=== installing datasets into $NEW_ENV ==="
-pip install -q "datasets" --no-input
-python - <<'PY'
-import torch
-print("torch after install:", torch.__version__, "| cuda build:", torch.version.cuda)
-PY
+# RNeNcodec's requirements.txt minus the torch trio (torch/torchaudio/torchvision):
+# those are already present from the clone in the cluster's known-good CUDA build,
+# and letting pip resolve them is exactly how the "no kernel image" failure gets
+# reintroduced. Everything listed here is pure-Python or a self-contained wheel.
+#
+# librosa is NOT optional even for training: rnencodec/__init__.py imports the
+# generator, which imports librosa at module scope, so `from training.loop import
+# train_model` fails without it.
+#
+# Deliberately skipped: sounddevice (needs PortAudio, real-time playback only) and
+# jupyterlab/ipywidgets (notebook UI) — neither is reachable from a training run.
+echo "=== installing RNeNcodec deps into $NEW_ENV (torch left untouched) ==="
+TORCH_BEFORE=$(python -c "import torch; print(torch.__version__)")
+pip install -q --no-input \
+    datasets \
+    librosa lazy_loader soxr resampy audioread soundfile scipy \
+    tensorboard matplotlib safetensors huggingface-hub tqdm pyyaml
+
+TORCH_AFTER=$(python -c "import torch; print(torch.__version__)")
+echo "torch before: $TORCH_BEFORE"
+echo "torch after:  $TORCH_AFTER"
+if [ "$TORCH_BEFORE" != "$TORCH_AFTER" ]; then
+    echo "!! pip changed the torch build ($TORCH_BEFORE -> $TORCH_AFTER)."
+    echo "!! That is the documented route to 'no kernel image is available'. Aborting."
+    exit 1
+fi
 
 echo "=== verification ==="
 python - <<'PY'
 import importlib.util as u
-need = ["torch", "transformers", "datasets", "soundfile", "numpy",
-        "pyarrow", "fsspec", "huggingface_hub"]
+need = ["torch", "transformers", "datasets", "soundfile", "numpy", "scipy",
+        "pyarrow", "fsspec", "huggingface_hub", "librosa", "soxr", "resampy",
+        "lazy_loader", "audioread", "tensorboard", "matplotlib"]
 missing = [m for m in need if not u.find_spec(m)]
 for m in need:
     print(f"  {'OK  ' if u.find_spec(m) else 'MISS'} {m}")
