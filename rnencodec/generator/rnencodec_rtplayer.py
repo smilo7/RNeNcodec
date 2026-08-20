@@ -27,7 +27,7 @@ class Up2x48kStream:
         self.dtype = dtype
         self.rs = soxr.ResampleStream(24000, 48000, num_channels=self.ch, dtype=dtype, quality=quality)
         self.buf = np.zeros((0, self.ch), dtype=dtype) if self.ch > 1 else np.zeros(0, dtype=dtype)
-
+ 
     def process(self, y24):
         x = np.asarray(y24, dtype=self.dtype, order="C")
         if self.ch > 1 and x.ndim == 1:
