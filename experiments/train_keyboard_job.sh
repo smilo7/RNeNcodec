@@ -42,7 +42,12 @@ OUT=${2:-runs/keyboard_denoised_12kbps}
 
 module load Miniconda3/4.9.2
 eval "$(conda shell.bash hook)"
-conda activate encodec_enhancer_baseline
+# Dedicated RNeNcodec env — a clone of encodec_enhancer_baseline (so the same
+# known-good torch/CUDA build) plus HuggingFace `datasets`, which RNeNcodec needs
+# to load its corpus and the nac-bwe env lacks. Build it once with
+# `sbatch experiments/setup_hpc_env.sh`. Kept separate so that installing for
+# RNeNcodec never mutates an env other jobs are running out of.
+conda activate "${RNENC_ENV:-rnencodec}"
 
 mkdir -p logs
 
